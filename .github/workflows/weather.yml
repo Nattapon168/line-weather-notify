@@ -1,0 +1,46 @@
+# ไฟล์นี้ต้องวางไว้ที่ path: .github/workflows/weather.yml ใน repo ของคุณ
+#
+# วิธีตั้งค่า:
+# 1. สร้าง repo บน GitHub (private ก็ได้ ฟรี)
+# 2. อัปโหลด weather_notify.py ไว้ที่ root ของ repo
+# 3. สร้างโฟลเดอร์ .github/workflows/ แล้ววางไฟล์นี้ (ตั้งชื่อ weather.yml) ไว้ในนั้น
+# 4. ไปที่ repo -> Settings -> Secrets and variables -> Actions -> New repository secret
+#    เพิ่ม 2 ตัว:
+#      LINE_CHANNEL_ACCESS_TOKEN = (token ของ LINE OA ตัวที่ 2)
+#      LINE_GROUP_ID             = (group id ที่ได้จาก webhook.site)
+# 5. เสร็จแล้ว ไปแท็บ Actions ของ repo -> เลือก workflow "Weather Notify"
+#    -> กด "Run workflow" เพื่อทดสอบรันครั้งแรกด้วยมือได้เลย
+# 6. หลังจากนั้นจะรันอัตโนมัติทุกวันตามเวลาที่ตั้งไว้ (cron ด้านล่างใช้เวลา UTC)
+
+name: Weather Notify
+
+on:
+  schedule:
+    # 23:15 UTC = 06:15 เวลาไทย (ICT = UTC+7)
+    - cron: "15 23 * * *"
+  workflow_dispatch: {}   # ทำให้กดรันเองจากหน้า Actions ได้ด้วย เพื่อทดสอบ
+
+jobs:
+  send-weather:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install requests
+
+      - name: Run weather notify script
+        env:
+          LINE_CHANNEL_ACCESS_TOKEN: ${{ secrets.LINE_CHANNEL_ACCESS_TOKEN }}
+          LINE_GROUP_ID: ${{ secrets.LINE_GROUP_ID }}
+          # พิกัด อ.สันทราย จ.เชียงใหม่ 50210 (ปรับได้ถ้าต้องการจุดอื่น)
+          WEATHER_LAT: "18.8488"
+          WEATHER_LON: "99.0446"
+          WEATHER_LOCATION_NAME: "อำเภอสันทราย จ.เชียงใหม่ 50210"
+        run: python3 weather_notify.py
