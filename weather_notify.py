@@ -29,10 +29,8 @@ import sys
 import json
 import random
 import hashlib
-import time
 import requests
 import urllib3
-from collections import Counter
 from datetime import datetime, timedelta, date
 from math import radians, sin, cos, sqrt, atan2
 
@@ -56,17 +54,8 @@ ENABLE_LOTTERY = os.environ.get("ENABLE_LOTTERY", "1") != "0"
 # เปิด/ปิดส่วนเลขสุ่มเสี่ยงดวง (เอาฮาอย่างเดียว ไม่เกี่ยวกับผลจริง)
 ENABLE_LUCKY_NUMBER = os.environ.get("ENABLE_LUCKY_NUMBER", "1") != "0"
 
-# เปิด/ปิดส่วนสถิติ "เลขออกบ่อย" ย้อนหลัง ~1 ปี (แสดงคู่กับพยากรณ์อากาศทุกวัน)
-ENABLE_HOT_NUMBERS = os.environ.get("ENABLE_HOT_NUMBERS", "1") != "0"
-# จำนวนงวดย้อนหลังที่จะดึงมาคำนวณสถิติ (ค่า default 24 งวด ~ 1 ปี เพราะออก 2 งวด/เดือน)
-HOT_NUMBERS_LOOKBACK_PERIODS = int(os.environ.get("HOT_NUMBERS_LOOKBACK_PERIODS", 24))
-# ไฟล์ cache ผลสถิติ กันไม่ต้องยิง API ซ้ำถ้ารันสคริปต์หลายรอบในวันเดียวกัน
-# (มีผลเฉพาะตอนรันบนเครื่อง/ session เดียวกัน เพราะ GitHub Actions checkout repo ใหม่ทุกครั้ง
-#  ถ้าอยากให้ cache ข้ามรอบ Actions จริงๆ ต้องเพิ่ม actions/cache ใน workflow แยกต่างหาก)
-HOT_NUMBERS_CACHE_FILE = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), ".lottery_history_cache.json"
-)
-HOT_NUMBERS_CACHE_TTL_HOURS = 20
+# เปิด/ปิดส่วนราคาทอง/น้ำมัน/ค่าเงิน (แสดงคู่กับพยากรณ์อากาศทุกวัน)
+ENABLE_MARKET_PRICES = os.environ.get("ENABLE_MARKET_PRICES", "1") != "0"
 
 if not LINE_CHANNEL_ACCESS_TOKEN or not LINE_GROUP_ID:
     print("[ERROR] ไม่พบ LINE_CHANNEL_ACCESS_TOKEN หรือ LINE_GROUP_ID")
@@ -414,110 +403,6 @@ def build_lottery_section():
     return "\n".join(lines)
 
 
-# ========== ส่วนสถิติ "เลขออกบ่อย" ย้อนหลัง ~1 ปี ==========
-
-
-def lottery_period_dates_back(n_periods, from_date=None):
-    """
-    คืน list ของวันที่งวดสลาก (datetime.date) ย้อนหลัง n_periods งวด
-    เริ่มนับจากงวดล่าสุดก่อนหน้า from_date (ไม่รวมงวดของวันนี้เอง ถ้ายังไม่ประกาศผล
-    ก็แค่ดึงไม่ได้ข้อมูล แล้วโค้ดฝั่งดึงจะข้ามให้เอง ไม่ทำให้พัง)
-    """
-    if from_date is None:
-        from_date = datetime.now().date()
-
-    if from_date.day >= 16:
-        cursor = from_date.replace(day=16)
-    else:
-        cursor = from_date.replace(day=1)
-
-    dates = []
-    for _ in range(n_periods):
-        dates.append(cursor)
-        cursor = previous_period_date(cursor)
-    return dates
-
-
-def fetch_lottery_history(dates, delay_sec=0.3):
-    """ดึงผลสลากย้อนหลังตามรายการวันที่ที่ให้มา ข้ามงวดที่ดึงไม่สำเร็จแบบเงียบๆ"""
-    results = []
-    for d in dates:
-        try:
-            r = get_lottery_by_date(d)
-        except Exception as e:
-            print(f"[WARN] ดึงประวัติสลากงวด {d} ไม่สำเร็จ ({e})")
-            r = None
-        if r:
-            results.append(r)
-        time.sleep(delay_sec)
-    return results
-
-
-def compute_hot_digits(history, top_n=5):
-    """นับความถี่ของแต่ละหลัก (0-9) ที่ปรากฏในเลขท้าย 2 ตัว และเลขท้าย 3 ตัว(ล่าง) ทั้งหมด"""
-    counter = Counter()
-    for r in history:
-        for num in r.get("last2", []):
-            counter.update(num)
-        for num in r.get("last3b", []):
-            counter.update(num)
-    return counter.most_common(top_n)
-
-
-def _load_hot_digits_cache():
-    try:
-        with open(HOT_NUMBERS_CACHE_FILE, "r", encoding="utf-8") as f:
-            cache = json.load(f)
-        cached_at = datetime.fromisoformat(cache["cached_at"])
-        if datetime.now() - cached_at < timedelta(hours=HOT_NUMBERS_CACHE_TTL_HOURS):
-            return [tuple(x) for x in cache["hot_digits"]]
-    except (FileNotFoundError, KeyError, ValueError, json.JSONDecodeError):
-        pass
-    return None
-
-
-def _save_hot_digits_cache(hot_digits):
-    try:
-        with open(HOT_NUMBERS_CACHE_FILE, "w", encoding="utf-8") as f:
-            json.dump(
-                {"cached_at": datetime.now().isoformat(), "hot_digits": hot_digits},
-                f,
-                ensure_ascii=False,
-            )
-    except OSError as e:
-        print(f"[WARN] บันทึก cache สถิติสลากไม่สำเร็จ ({e})")
-
-
-def build_hot_numbers_section():
-    """
-    สรุป 'เลขที่ออกบ่อย' โดยนับความถี่ของแต่ละหลัก (0-9) ที่ปรากฏใน
-    เลขท้าย 2 ตัว และเลขท้าย 3 ตัว(ล่าง) ย้อนหลังประมาณ 1 ปี (ค่า default 24 งวด)
-    เป็นแค่สถิติสนุกๆ ไม่ใช่การพยากรณ์ผลจริง แสดงคู่กับพยากรณ์อากาศทุกวัน
-    """
-    hot_digits = _load_hot_digits_cache()
-
-    if hot_digits is None:
-        dates = lottery_period_dates_back(HOT_NUMBERS_LOOKBACK_PERIODS)
-        history = fetch_lottery_history(dates)
-        if not history:
-            print("[WARN] ดึงประวัติสลากไม่สำเร็จเลยสักงวด ข้ามส่วนสถิติเลขออกบ่อย")
-            return None
-        hot_digits = compute_hot_digits(history, top_n=5)
-        _save_hot_digits_cache(hot_digits)
-
-    if not hot_digits:
-        return None
-
-    digits_text = ", ".join(f"{digit} ({count} ครั้ง)" for digit, count in hot_digits)
-    lines = [
-        "",
-        "── สถิติเลขออกบ่อย ย้อนหลัง ~1 ปี 📊 ──",
-        f"🔥 หลักเลขที่ออกบ่อยสุด 5 อันดับ: {digits_text}",
-        "(นับจากตัวเลขในเลขท้าย 2 ตัว/3 ตัว ย้อนหลัง เป็นสถิติสนุกๆ ไม่ใช่การพยากรณ์)",
-    ]
-    return "\n".join(lines)
-
-
 # ========== ส่วนเลขสุ่มเสี่ยงดวง (เอาฮาอย่างเดียว) ==========
 
 
@@ -535,6 +420,325 @@ def next_draw_date(today):
         else:
             month += 1
         return date(year, month, 1)
+
+
+# ========== ส่วนราคาทอง / น้ำมัน / ค่าเงิน ==========
+# ใช้ API สาธารณะฟรี ไม่ต้องใช้ API key (ทดสอบเชื่อมต่อจริงไม่ได้จากเครื่อง dev
+# เพราะโดเมนเหล่านี้ไม่อยู่ใน network allowlist ที่นี่ แต่ครอบ try/except ไว้ให้ครบ)
+
+
+def get_gold_price():
+    """ดึงราคาทองคำล่าสุด (crawl มาจาก goldtraders.or.th ผ่าน api.chnwt.dev ฟรี ไม่ต้องใช้ key)"""
+    url = "https://api.chnwt.dev/thai-gold-api/latest"
+    r = requests.get(url, timeout=15)
+    r.raise_for_status()
+    data = r.json()
+    resp = data.get("response", {}) or {}
+    price = resp.get("price", {}) or {}
+    return {
+        "update_date": resp.get("update_date", "?"),
+        "update_time": resp.get("update_time", "?"),
+        "ornament_buy": (price.get("gold") or {}).get("buy", "n/a"),
+        "ornament_sell": (price.get("gold") or {}).get("sell", "n/a"),
+        "bar_buy": (price.get("gold_bar") or {}).get("buy", "n/a"),
+        "bar_sell": (price.get("gold_bar") or {}).get("sell", "n/a"),
+    }
+
+
+def get_oil_price():
+    """
+    ดึงราคาน้ำมันล่าสุด (crawl มาจาก gasprice.kapook.com ผ่าน api.chnwt.dev ฟรี ไม่ต้องใช้ key)
+    เลือกใช้ราคาสถานี ปตท. เป็นตัวแทน (station key 'ptt')
+    """
+    url = "https://api.chnwt.dev/thai-oil-api/latest"
+    r = requests.get(url, timeout=15)
+    r.raise_for_status()
+    data = r.json()
+    resp = data.get("response", {}) or {}
+    stations = resp.get("stations", {}) or {}
+    ptt = stations.get("ptt", {}) or {}
+
+    def _price(key):
+        return (ptt.get(key) or {}).get("price", "n/a")
+
+    return {
+        "date": resp.get("date", "?"),
+        "gasoline_95": _price("gasoline_95"),
+        "gasohol_95": _price("gasohol_95"),
+        "gasohol_91": _price("gasohol_91"),
+        "diesel": _price("diesel"),
+    }
+
+
+def get_usd_thb_rate():
+    """ดึงอัตราแลกเปลี่ยน USD/THB ล่าสุดจาก open.er-api.com (ฟรี ไม่ต้องใช้ API key)"""
+    url = "https://open.er-api.com/v6/latest/USD"
+    r = requests.get(url, timeout=15)
+    r.raise_for_status()
+    data = r.json()
+    if data.get("result") != "success":
+        return None
+    rate = (data.get("rates") or {}).get("THB")
+    if rate is None:
+        return None
+    return {
+        "rate": round(float(rate), 2),
+        "updated_utc": data.get("time_last_update_utc", "?"),
+    }
+
+
+def build_market_prices_section():
+    """
+    สรุปราคาทองคำ / น้ำมัน / อัตราแลกเปลี่ยน USD-THB ล่าสุด ณ เวลาที่แจ้งเตือน
+    ถ้าดึงข้อมูลแหล่งไหนไม่สำเร็จ จะข้ามเฉพาะส่วนนั้นไปแบบเงียบๆ (log [WARN] ไว้) ไม่ทำให้ข้อความอื่นพัง
+    """
+    lines = ["", "── ราคาทอง / น้ำมัน / ค่าเงิน 💰 ──"]
+    has_any_data = False
+
+    try:
+        gold = get_gold_price()
+        lines.append(f"🥇 ทองคำแท่ง: รับซื้อ {gold['bar_buy']} / ขายออก {gold['bar_sell']} บาท")
+        lines.append(f"📿 ทองรูปพรรณ: รับซื้อ {gold['ornament_buy']} / ขายออก {gold['ornament_sell']} บาท")
+        lines.append(f"   (สมาคมค้าทองคำ ณ {gold['update_date']} {gold['update_time']})")
+        has_any_data = True
+    except Exception as e:
+        print(f"[WARN] ดึงราคาทองคำไม่สำเร็จ ({e})")
+
+    try:
+        oil = get_oil_price()
+        lines.append(
+            f"⛽ เบนซิน 95: {oil['gasoline_95']} | แก๊สโซฮอล์ 95: {oil['gasohol_95']} | "
+            f"แก๊สโซฮอล์ 91: {oil['gasohol_91']} บาท/ลิตร"
+        )
+        lines.append(f"🚛 ดีเซล: {oil['diesel']} บาท/ลิตร  (ราคาสถานี ปตท. ณ {oil['date']})")
+        has_any_data = True
+    except Exception as e:
+        print(f"[WARN] ดึงราคาน้ำมันไม่สำเร็จ ({e})")
+
+    try:
+        fx = get_usd_thb_rate()
+        if fx:
+            lines.append(f"💵 ค่าเงินบาท: 1 USD ≈ {fx['rate']} บาท")
+            has_any_data = True
+    except Exception as e:
+        print(f"[WARN] ดึงอัตราแลกเปลี่ยนไม่สำเร็จ ({e})")
+
+    if not has_any_data:
+        return None
+
+    return "\n".join(lines)
+
+
+# ========== ส่วนข้อความให้กำลังใจประจำวัน ==========
+# ข้อความทั้งหมดแต่งขึ้นเอง (ไม่ใช่คำคมของบุคคลจริง) เพื่อเลี่ยงปัญหาลิขสิทธิ์/การอ้างอิงผิดคน
+# สุ่มใหม่ทุกครั้งที่แจ้งเตือน (ไม่ล็อกตายตัวต่อวันเหมือนเลขเสี่ยงดวง)
+
+ENCOURAGEMENT_QUOTES = [
+    # -- ก้าวเล็กๆ / ความก้าวหน้า --
+    ("Small steps every day still take you far.", "ก้าวเล็กๆ ในแต่ละวัน ก็พาไปได้ไกลเหมือนกัน"),
+    ("Progress is still progress, no matter how small.", "ความก้าวหน้ายังคงเป็นความก้าวหน้า ไม่ว่าจะเล็กแค่ไหน"),
+    ("One small step today is enough.", "แค่ก้าวเล็กๆ วันนี้ก็เพียงพอแล้ว"),
+    ("You don't need a big leap, just the next small step.", "ไม่ต้องกระโดดไกล แค่ก้าวถัดไปทีละก้าวก็พอ"),
+    ("Slow progress beats no progress at all.", "ก้าวหน้าช้าๆ ก็ยังดีกว่าไม่ก้าวหน้าเลย"),
+    ("Every little effort adds up over time.", "ความพยายามเล็กๆ น้อยๆ สะสมกันได้เสมอ"),
+    ("You're closer today than you were yesterday.", "วันนี้คุณใกล้เป้าหมายกว่าเมื่อวานแล้ว"),
+    ("Small wins deserve to be celebrated too.", "ชัยชนะเล็กๆ ก็สมควรได้รับการฉลองเหมือนกัน"),
+    ("Keep stacking small good days together.", "สะสมวันดีๆ เล็กๆ ไปเรื่อยๆ นะ"),
+    ("A little progress each day adds up to big results.", "ความคืบหน้าเล็กน้อยในแต่ละวัน รวมกันแล้วกลายเป็นผลลัพธ์ที่ยิ่งใหญ่ได้"),
+    ("You don't have to finish today, just continue.", "ไม่ต้องทำให้เสร็จวันนี้ก็ได้ แค่ทำต่อไปก็พอ"),
+    ("Even a tiny step forward is still forward.", "แม้แต่ก้าวเล็กๆ ไปข้างหน้า ก็ยังถือว่าไปข้างหน้าอยู่ดี"),
+    ("Trust the process, one day at a time.", "เชื่อในกระบวนการ ทำไปทีละวันก็พอ"),
+    ("You are building something, even on quiet days.", "คุณกำลังสร้างบางอย่างอยู่ แม้ในวันที่เงียบๆ ก็ตาม"),
+    ("Consistency matters more than speed.", "ความสม่ำเสมอสำคัญกว่าความเร็ว"),
+    ("Today's effort is tomorrow's foundation.", "ความพยายามวันนี้ คือรากฐานของพรุ่งนี้"),
+    ("You've come further than you give yourself credit for.", "คุณมาไกลกว่าที่คุณให้เครดิตตัวเองไว้เยอะ"),
+    ("Don't compare your chapter one to someone else's chapter ten.", "อย่าเอาบทที่หนึ่งของคุณไปเทียบกับบทที่สิบของคนอื่น"),
+    ("Growth doesn't always look like progress, but it counts.", "การเติบโตไม่ได้ดูเหมือนความก้าวหน้าเสมอไป แต่มันก็นับ"),
+    ("Just keep going, even slowly.", "แค่ทำต่อไป ต่อให้ช้าก็ไม่เป็นไร"),
+    # -- ใจดีกับตัวเอง --
+    ("Be as kind to yourself as you are to others.", "ใจดีกับตัวเองบ้าง เหมือนที่ใจดีกับคนอื่น"),
+    ("You are allowed to be gentle with yourself today.", "วันนี้อนุญาตให้ตัวเองอ่อนโยนกับตัวเองได้"),
+    ("Kindness toward yourself is not a weakness.", "ใจดีกับตัวเองไม่ใช่ความอ่อนแอ"),
+    ("You don't have to be perfect to be worthy.", "ไม่ต้องสมบูรณ์แบบก็มีค่าพอในตัวเองอยู่แล้ว"),
+    ("Speak to yourself like someone you love.", "พูดกับตัวเองเหมือนพูดกับคนที่คุณรัก"),
+    ("It's okay to forgive yourself for today's mistakes.", "ให้อภัยตัวเองสำหรับความผิดพลาดวันนี้ได้นะ"),
+    ("You are more than your worst day.", "คุณเป็นมากกว่าวันที่แย่ที่สุดของคุณ"),
+    ("Self-care isn't selfish, it's necessary.", "การดูแลตัวเองไม่ใช่ความเห็นแก่ตัว แต่มันจำเป็น"),
+    ("You deserve the same patience you give to others.", "คุณสมควรได้รับความอดทนแบบเดียวกับที่ให้คนอื่น"),
+    ("You are doing the best you can, and that matters.", "คุณกำลังทำดีที่สุดเท่าที่ทำได้ และนั่นสำคัญ"),
+    ("Not liking yourself today doesn't mean you're unworthy.", "ไม่ชอบตัวเองในวันนี้ ไม่ได้แปลว่าคุณไม่มีค่า"),
+    ("Give yourself the grace you'd give a friend.", "ให้อภัยตัวเองแบบที่คุณให้เพื่อนบ้าง"),
+    ("You are allowed to take up space.", "คุณมีสิทธิ์ที่จะมีตัวตนอยู่ตรงนี้"),
+    ("Your worth isn't measured by your productivity.", "คุณค่าของคุณไม่ได้วัดจากผลงานที่ทำได้"),
+    ("You are enough, even on an ordinary day.", "คุณดีพอแล้ว แม้ในวันธรรมดาๆ"),
+    ("Treat yourself like someone worth taking care of.", "ดูแลตัวเองเหมือนดูแลคนที่คุณค่าควรแก่การดูแล"),
+    ("It's okay to need rest without justifying it.", "พักได้โดยไม่ต้องหาเหตุผลมาอธิบาย"),
+    ("You are not behind in life, you're on your own timeline.", "คุณไม่ได้ล้าหลังชีวิตใคร คุณแค่มีเส้นทางเวลาของตัวเอง"),
+    ("Your feelings are valid, even the uncomfortable ones.", "ความรู้สึกของคุณมีค่าเสมอ แม้จะเป็นความรู้สึกที่ไม่สบายใจก็ตาม"),
+    ("You can be a work in progress and still be loved.", "คุณเป็นงานที่ยังไม่เสร็จได้ และยังคงเป็นที่รักได้เหมือนกัน"),
+    # -- การพักผ่อน --
+    ("Rest is not the opposite of progress, it's part of it.", "การพักผ่อนไม่ใช่ตรงข้ามความก้าวหน้า แต่เป็นส่วนหนึ่งของมัน"),
+    ("Take the rest you need without feeling guilty.", "พักได้เท่าที่ร่างกายต้องการ ไม่ต้องรู้สึกผิด"),
+    ("A slow morning can still lead to a good day.", "เช้าที่ช้าหน่อย ก็ยังนำไปสู่วันที่ดีได้"),
+    ("Not every day needs to be productive to be meaningful.", "ไม่จำเป็นทุกวันต้องมีผลงาน ถึงจะมีความหมาย"),
+    ("Rest now, so you can keep going later.", "พักตอนนี้ เพื่อจะได้ไปต่อได้ในภายหลัง"),
+    ("It's okay to slow down when you need to.", "ช้าลงได้เมื่อคุณต้องการ ไม่เป็นไรเลย"),
+    ("Doing nothing for a while is sometimes exactly what you need.", "บางครั้งการไม่ทำอะไรเลยสักพัก ก็คือสิ่งที่คุณต้องการพอดี"),
+    ("Recharge without apology.", "ชาร์จพลังใหม่ได้โดยไม่ต้องขอโทษใคร"),
+    ("Even machines need to pause sometimes, so do you.", "แม้แต่เครื่องจักรยังต้องหยุดพักบ้าง คุณก็เช่นกัน"),
+    ("A pause is not the same as giving up.", "การหยุดพัก ไม่เหมือนกับการยอมแพ้"),
+    ("You've earned a little quiet time today.", "วันนี้คุณสมควรได้เวลาเงียบๆ สักหน่อย"),
+    ("Breathing slowly counts as doing something good for yourself.", "แค่หายใจช้าๆ ก็ถือว่าทำสิ่งดีให้ตัวเองแล้ว"),
+    ("Let today be lighter than yesterday.", "ขอให้วันนี้เบาสบายกว่าเมื่อวาน"),
+    ("Naps are productive too, in their own way.", "การงีบหลับก็มีประโยชน์ในแบบของมันเหมือนกัน"),
+    ("You don't owe anyone constant energy.", "คุณไม่จำเป็นต้องมีพลังเต็มร้อยตลอดเวลาให้ใคร"),
+    ("Stillness can be its own kind of progress.", "ความนิ่งเงียบก็เป็นความก้าวหน้าในแบบของมันได้"),
+    ("Give your mind permission to rest today.", "อนุญาตให้ใจของคุณได้พักบ้างในวันนี้"),
+    ("Slow down, you're not behind.", "ช้าลงหน่อยก็ได้ คุณไม่ได้ล้าหลังใคร"),
+    ("A calm afternoon is still a good afternoon.", "บ่ายที่เงียบสงบ ก็ยังเป็นบ่ายที่ดีอยู่ดี"),
+    ("Taking a break is part of taking care of yourself.", "การพักคือส่วนหนึ่งของการดูแลตัวเอง"),
+    # -- ความหวัง / พรุ่งนี้ --
+    ("The sun rises again tomorrow, no matter how today goes.", "พรุ่งนี้พระอาทิตย์ก็ขึ้นอีกครั้งเสมอ ไม่ว่าวันนี้จะเป็นยังไง"),
+    ("Every storm runs out of rain eventually.", "พายุทุกลูก สักวันก็หมดฝนไปเอง"),
+    ("Tomorrow is a fresh page, unwritten.", "พรุ่งนี้คือหน้ากระดาษใหม่ที่ยังไม่ได้เขียนอะไรลงไป"),
+    ("Better days are still ahead of you.", "วันที่ดีกว่ายังรอคุณอยู่ข้างหน้า"),
+    ("Hope doesn't have to be loud to be real.", "ความหวังไม่ต้องดังก็เป็นของจริงได้"),
+    ("This hard season won't last forever.", "ช่วงเวลายากๆ นี้ไม่ได้อยู่กับคุณตลอดไปหรอก"),
+    ("Things can still turn around, even now.", "ทุกอย่างยังพลิกกลับมาดีได้ แม้ตอนนี้จะยาก"),
+    ("A little light is enough to keep walking.", "แค่แสงสว่างนิดเดียว ก็เพียงพอให้เดินต่อไปได้"),
+    ("You don't have to see the whole path, just the next step.", "ไม่ต้องเห็นทางทั้งหมดก็ได้ แค่เห็นก้าวถัดไปก็พอ"),
+    ("Even cloudy days end with a sunset somewhere.", "วันที่มีเมฆครึ้ม ก็ยังจบลงด้วยพระอาทิตย์ตกที่ไหนสักแห่งเสมอ"),
+    ("Keep a little room for hope today.", "เก็บที่ว่างเล็กๆ ไว้สำหรับความหวังในวันนี้ด้วยนะ"),
+    ("What feels impossible today may feel lighter tomorrow.", "สิ่งที่รู้สึกเป็นไปไม่ได้วันนี้ พรุ่งนี้อาจรู้สึกเบาลงก็ได้"),
+    ("New mornings bring new chances.", "เช้าวันใหม่มาพร้อมโอกาสใหม่เสมอ"),
+    ("This chapter isn't your whole story.", "บทนี้ไม่ใช่เรื่องราวทั้งหมดของคุณ"),
+    ("Somewhere ahead, there's a good day waiting for you.", "ข้างหน้ามีวันดีๆ รอคุณอยู่แน่นอน"),
+    ("You're allowed to hope for something better.", "คุณมีสิทธิ์หวังถึงสิ่งที่ดีกว่าได้เสมอ"),
+    ("Even in the dark, morning is still coming.", "แม้ในความมืด เช้าก็ยังคงมาถึงเสมอ"),
+    ("Hold on a little longer, change is often close.", "อดทนอีกนิด บางทีความเปลี่ยนแปลงก็อยู่ใกล้แค่เอื้อม"),
+    ("The bad days pass, just like the good ones do.", "วันแย่ๆ ก็ผ่านไปได้ เหมือนวันดีๆ ที่เคยผ่านมา"),
+    ("Keep believing that things can get better.", "เชื่อต่อไปว่าทุกอย่างจะดีขึ้นได้"),
+    # -- ความกล้าหาญ --
+    ("You are braver than you think, on your hardest days.", "คุณกล้าหาญกว่าที่คิดไว้ แม้ในวันที่ยากที่สุด"),
+    ("Facing a hard day already takes courage.", "แค่กล้าเผชิญวันที่ยากลำบาก ก็ต้องใช้ความกล้าหาญแล้ว"),
+    ("It's okay to feel scared and keep going anyway.", "กลัวได้ แต่ก็ยังไปต่อได้เหมือนกัน"),
+    ("Every brave thing starts as a small, shaky step.", "เรื่องกล้าหาญทุกเรื่องเริ่มจากก้าวเล็กๆ ที่สั่นเทาเสมอ"),
+    ("You made it through every hard day so far. That's proof enough.", "ผ่านวันยากๆ มาได้ทุกครั้ง นั่นแหละคือหลักฐานว่าคุณไหว"),
+    ("Asking for help takes real courage.", "การขอความช่วยเหลือ ก็ต้องใช้ความกล้าหาญจริงๆ"),
+    ("You don't have to feel ready to start.", "ไม่ต้องรู้สึกพร้อมก็เริ่มได้"),
+    ("Standing up again after falling counts as strength.", "ลุกขึ้นใหม่หลังจากล้ม ก็นับเป็นความแข็งแกร่งแล้ว"),
+    ("Uncertainty is uncomfortable, but you can sit with it.", "ความไม่แน่นอนมันอึดอัด แต่คุณอยู่กับมันได้"),
+    ("You've handled hard things before, you can handle this too.", "คุณเคยผ่านเรื่องยากมาก่อน ครั้งนี้ก็ผ่านได้เหมือนกัน"),
+    ("Courage doesn't mean feeling no fear at all.", "ความกล้าหาญไม่ได้แปลว่าไม่มีความกลัวเลย"),
+    ("Trying again after a setback is its own kind of brave.", "ลองใหม่หลังจากล้มเหลว ก็คือความกล้าในแบบหนึ่ง"),
+    ("Small acts of courage still count.", "การกล้าหาญเล็กๆ น้อยๆ ก็ยังนับเสมอ"),
+    ("You are allowed to take things one brave step at a time.", "คุณกล้าได้ทีละก้าวก็พอ ไม่ต้องรีบ"),
+    ("Facing today is enough, you don't have to solve everything at once.", "แค่เผชิญกับวันนี้ก็พอแล้ว ไม่ต้องแก้ทุกอย่างพร้อมกัน"),
+    ("You're stronger than the thing that's worrying you.", "คุณแข็งแกร่งกว่าเรื่องที่กำลังกังวลอยู่"),
+    ("It takes courage to keep trying after disappointment.", "ต้องใช้ความกล้าเพื่อจะลองอีกครั้งหลังจากผิดหวัง"),
+    ("Being honest about struggling is a brave thing to do.", "การยอมรับตรงๆ ว่ากำลังลำบากอยู่ ก็เป็นเรื่องที่กล้าหาญ"),
+    ("You don't need to be fearless, just willing to try.", "ไม่ต้องไม่กลัวเลยก็ได้ แค่เต็มใจจะลองก็พอ"),
+    ("Every time you keep going, you prove you're capable.", "ทุกครั้งที่คุณไปต่อ คุณก็พิสูจน์ว่าคุณทำได้"),
+    # -- ความสุขเล็กๆ / ขอบคุณ --
+    ("One good moment is enough to make a day worth it.", "แค่ช่วงเวลาดีๆ สักครั้งเดียว ก็ทำให้วันนั้นคุ้มค่าแล้ว"),
+    ("A little sunshine can change the whole mood of a day.", "แดดนิดเดียวก็เปลี่ยนอารมณ์ทั้งวันได้"),
+    ("Notice the small good things, they add up.", "สังเกตสิ่งดีๆ เล็กๆ น้อยๆ ไว้ มันสะสมกันได้"),
+    ("A warm cup of something can be a small comfort today.", "เครื่องดื่มอุ่นๆ สักแก้ว ก็เป็นความอบอุ่นเล็กๆ ของวันนี้ได้"),
+    ("Simple moments often hold the most warmth.", "ช่วงเวลาธรรมดาๆ มักเก็บความอบอุ่นไว้มากที่สุด"),
+    ("Being grateful for little things makes room for more of them.", "รู้สึกขอบคุณกับเรื่องเล็กๆ ก็เปิดทางให้เรื่องดีๆ เข้ามาอีก"),
+    ("A kind word today can be someone's whole day.", "คำพูดดีๆ วันนี้ อาจเป็นทั้งวันที่ดีของใครสักคน"),
+    ("There's beauty in ordinary days too.", "ความสวยงามมีอยู่ในวันธรรมดาด้วยเหมือนกัน"),
+    ("Let yourself enjoy the small things without guilt.", "ปล่อยให้ตัวเองมีความสุขกับเรื่องเล็กๆ โดยไม่ต้องรู้สึกผิด"),
+    ("A good meal, a kind message, a quiet moment, all count.", "มื้ออาหารดีๆ ข้อความอบอุ่น ช่วงเวลาเงียบสงบ ล้วนมีค่าทั้งนั้น"),
+    ("Slow down enough to notice something good today.", "ช้าลงสักนิด เพื่อสังเกตสิ่งดีๆ ที่เกิดขึ้นวันนี้"),
+    ("Even small comforts deserve to be appreciated.", "ความสบายใจเล็กๆ ก็สมควรได้รับการขอบคุณ"),
+    ("The little joys are still joys.", "ความสุขเล็กๆ ก็ยังเป็นความสุขอยู่ดี"),
+    ("A good laugh can lighten even a heavy day.", "เสียงหัวเราะดีๆ ก็ทำให้วันที่หนักอึ้งเบาลงได้"),
+    ("Thank yourself for making it through today.", "ขอบคุณตัวเองที่ผ่านวันนี้มาได้"),
+    ("There's always something small worth being thankful for.", "มักจะมีเรื่องเล็กๆ ที่ควรค่าแก่การขอบคุณเสมอ"),
+    ("Appreciate the quiet wins nobody else sees.", "ชื่นชมชัยชนะเงียบๆ ที่ไม่มีใครเห็นบ้าง"),
+    ("A gentle breeze, a good song, a nice memory, small gifts of the day.", "สายลมเย็นๆ เพลงเพราะๆ ความทรงจำดีๆ คือของขวัญเล็กๆ ของวันนี้"),
+    ("Today had at least one good part, hold onto that.", "วันนี้มีอย่างน้อยหนึ่งช่วงที่ดี เก็บมันไว้นะ"),
+    ("Gratitude turns an ordinary day into something warmer.", "ความรู้สึกขอบคุณ เปลี่ยนวันธรรมดาให้อบอุ่นขึ้นได้"),
+    # -- ความอดทน / การเติบโต --
+    ("Growth is quiet most of the time, keep going.", "การเติบโตส่วนใหญ่มันเงียบๆ แบบนี้แหละ สู้ต่อไปนะ"),
+    ("Even the smallest plant needs time to grow roots.", "แม้แต่ต้นเล็กๆ ก็ยังต้องใช้เวลาหยั่งราก"),
+    ("Good things take time, and that's okay.", "สิ่งดีๆ ต้องใช้เวลา และนั่นก็ไม่เป็นไร"),
+    ("You're allowed to grow at your own pace.", "คุณเติบโตในจังหวะของตัวเองได้"),
+    ("Not every season is for blooming, some are for rooting.", "ไม่ใช่ทุกฤดูกาลที่ต้องออกดอก บางฤดูก็มีไว้สำหรับหยั่งราก"),
+    ("Patience with yourself is a quiet kind of strength.", "ความอดทนกับตัวเอง ก็เป็นความแข็งแกร่งแบบเงียบๆ"),
+    ("Some things grow best when left alone for a while.", "บางอย่างก็เติบโตได้ดีที่สุด เมื่อถูกปล่อยไว้สักพัก"),
+    ("Change rarely happens overnight, and that's normal.", "การเปลี่ยนแปลงมักไม่เกิดในชั่วข้ามคืน และนั่นก็ปกติดี"),
+    ("You are allowed to still be figuring things out.", "คุณยังค้นหาคำตอบอยู่ได้ ไม่เป็นไรเลย"),
+    ("Growth doesn't always feel like progress while it's happening.", "การเติบโตไม่ได้รู้สึกเหมือนความก้าวหน้าเสมอไป ตอนที่มันกำลังเกิดขึ้น"),
+    ("Trust the timing of your own life.", "เชื่อในจังหวะเวลาของชีวิตตัวเองบ้าง"),
+    ("Every expert was once a beginner too.", "ผู้เชี่ยวชาญทุกคนก็เคยเป็นมือใหม่มาก่อนทั้งนั้น"),
+    ("It's okay if today is just for practicing, not perfecting.", "วันนี้แค่ฝึกฝนก็พอ ไม่ต้องสมบูรณ์แบบ"),
+    ("Roots grow in the dark before anything blooms above ground.", "รากเติบโตอยู่ในความมืดก่อนที่อะไรจะผลิบานเหนือดิน"),
+    ("You're not late, you're right on time for your own path.", "คุณไม่ได้มาสาย คุณมาถูกเวลาสำหรับเส้นทางของตัวเอง"),
+    ("Some lessons take longer to learn, and that's fine.", "บางบทเรียนก็ใช้เวลาเรียนรู้นานกว่า และนั่นก็โอเค"),
+    ("Keep tending to your own growth quietly.", "ดูแลการเติบโตของตัวเองไปเงียบๆ ต่อไปนะ"),
+    ("A little patience today saves a lot of frustration tomorrow.", "อดทนอีกนิดวันนี้ ช่วยลดความหงุดหงิดในวันข้างหน้าได้เยอะ"),
+    ("You're allowed to take the long way if it's the right way.", "เลือกเดินทางไกลได้ ถ้ามันเป็นทางที่ถูกต้องสำหรับคุณ"),
+    ("Give yourself permission to still be learning.", "อนุญาตให้ตัวเองยังคงเรียนรู้อยู่ได้เสมอ"),
+    # -- การปล่อยวาง --
+    ("It's okay to let go of what no longer serves you.", "ปล่อยวางสิ่งที่ไม่มีประโยชน์กับคุณอีกต่อไปได้นะ"),
+    ("Holding on tightly isn't always strength.", "การยึดติดแน่นๆ ไม่ได้แปลว่าแข็งแกร่งเสมอไป"),
+    ("You can forgive without forgetting the lesson.", "ให้อภัยได้ โดยไม่ต้องลืมบทเรียนที่ได้รับ"),
+    ("Releasing what hurts you is an act of self-care.", "ปล่อยสิ่งที่ทำให้เจ็บปวดไป ก็คือการดูแลตัวเองแบบหนึ่ง"),
+    ("You don't have to carry yesterday's weight into today.", "ไม่ต้องแบกน้ำหนักของเมื่อวาน มาไว้ในวันนี้ก็ได้"),
+    ("Letting go doesn't mean the memory didn't matter.", "การปล่อยวาง ไม่ได้แปลว่าความทรงจำนั้นไม่มีความหมาย"),
+    ("It's okay to close a chapter that's no longer good for you.", "ปิดบทที่ไม่ดีต่อคุณอีกต่อไปได้เลย"),
+    ("Forgiving yourself is part of moving forward.", "ให้อภัยตัวเอง คือส่วนหนึ่งของการก้าวไปข้างหน้า"),
+    ("You can release the outcome and still have done your best.", "ปล่อยผลลัพธ์ไปได้ ถึงแม้คุณจะทำเต็มที่แล้วก็ตาม"),
+    ("Some things are meant to be set down, not fixed.", "บางอย่างมีไว้ให้วางลง ไม่ใช่ให้ซ่อมแซม"),
+    ("You are not required to hold onto every hurt.", "คุณไม่จำเป็นต้องแบกความเจ็บปวดทุกอย่างไว้"),
+    ("Letting go can feel like loss and relief at the same time.", "การปล่อยวาง อาจรู้สึกเหมือนสูญเสียและโล่งใจไปพร้อมกันได้"),
+    ("You are allowed to walk away from what drains you.", "เดินออกจากสิ่งที่ทำให้คุณหมดพลังได้เลย"),
+    ("Peace is sometimes found in letting go, not winning.", "บางครั้งความสงบก็เจอได้จากการปล่อยวาง ไม่ใช่จากการชนะ"),
+    ("You can love someone or something and still let it go.", "คุณรักใครสักคนหรือบางอย่างได้ และยังปล่อยมันไปได้เหมือนกัน"),
+    ("Forgiveness is a gift you give yourself too.", "การให้อภัย ก็เป็นของขวัญที่คุณให้กับตัวเองด้วยเหมือนกัน"),
+    ("It's okay to stop carrying what isn't yours to carry.", "หยุดแบกสิ่งที่ไม่ใช่หน้าที่ของคุณได้เลย"),
+    ("You can release the need to have all the answers today.", "ปล่อยความต้องการที่จะมีคำตอบทุกอย่างวันนี้ไปได้"),
+    ("Not every battle needs to be fought to feel at peace.", "ไม่ใช่ทุกสมรภูมิที่ต้องสู้ ถึงจะรู้สึกสงบได้"),
+    ("Sometimes the bravest thing is simply letting it go.", "บางครั้งเรื่องที่กล้าหาญที่สุด ก็แค่การปล่อยมันไป"),
+    # -- การเริ่มต้นใหม่ --
+    ("You are allowed to start again, as many times as you need.", "เริ่มใหม่ได้เสมอ กี่ครั้งก็ได้เท่าที่ต้องการ"),
+    ("Every ending makes room for a new beginning.", "ทุกการจบ เปิดทางให้กับการเริ่มต้นใหม่เสมอ"),
+    ("It's never too late to try something new.", "ไม่มีคำว่าสายเกินไปสำหรับการลองสิ่งใหม่ๆ"),
+    ("A fresh start doesn't need a perfect plan.", "การเริ่มต้นใหม่ ไม่จำเป็นต้องมีแผนที่สมบูรณ์แบบ"),
+    ("You can rewrite today, even if yesterday went badly.", "เขียนวันนี้ใหม่ได้ ถึงแม้เมื่อวานจะแย่ก็ตาม"),
+    ("Beginnings are allowed to be messy and uncertain.", "การเริ่มต้น อนุญาตให้ยุ่งเหยิงและไม่แน่นอนได้"),
+    ("You get to choose who you become from here.", "คุณเลือกได้ว่าจะเป็นใครต่อจากนี้"),
+    ("Today can be day one of something good.", "วันนี้อาจเป็นวันแรกของบางอย่างที่ดีก็ได้"),
+    ("New beginnings often start quietly, without fanfare.", "การเริ่มต้นใหม่มักเริ่มอย่างเงียบๆ โดยไม่มีพิธีรีตอง"),
+    ("You are not the same person you were yesterday, and that's growth.", "คุณไม่ใช่คนเดิมเมื่อวานแล้ว และนั่นคือการเติบโต"),
+    ("Starting over isn't failure, it's often wisdom.", "การเริ่มใหม่ไม่ใช่ความล้มเหลว บ่อยครั้งมันคือความฉลาด"),
+    ("Give this new chapter a fair chance.", "ให้โอกาสบทใหม่นี้อย่างเต็มที่"),
+    ("Every sunrise is an invitation to begin again.", "พระอาทิตย์ขึ้นทุกครั้ง คือคำเชิญให้เริ่มต้นใหม่อีกครั้ง"),
+    ("You can leave the old story behind whenever you're ready.", "ทิ้งเรื่องราวเก่าไว้ข้างหลังได้ เมื่อคุณพร้อม"),
+    ("First steps are allowed to feel wobbly.", "ก้าวแรกๆ อนุญาตให้รู้สึกไม่มั่นคงได้"),
+    ("A new beginning doesn't erase the old one, it builds on it.", "การเริ่มต้นใหม่ ไม่ได้ลบล้างของเก่า แต่ต่อยอดจากมัน"),
+    ("You're allowed to want something different now.", "คุณอยากได้อะไรที่ต่างไปตอนนี้ก็ได้ ไม่ผิดอะไร"),
+    ("Change can be scary and still be exactly what you need.", "การเปลี่ยนแปลงอาจน่ากลัว แต่ก็ยังเป็นสิ่งที่คุณต้องการพอดี"),
+    ("Today is a good day to plant a new seed.", "วันนี้เป็นวันที่ดีสำหรับการปลูกเมล็ดพันธุ์ใหม่"),
+    ("Whatever happened before, you can still choose your next chapter.", "ไม่ว่าอะไรจะเกิดขึ้นมาก่อน คุณยังเลือกบทต่อไปของตัวเองได้เสมอ"),
+]
+
+
+def build_encouragement_section():
+    """
+    เลือกข้อความให้กำลังใจ (อังกฤษ + คำแปลไทย) แบบสุ่มจริง เปลี่ยนทุกครั้งที่แจ้งเตือน
+    ข้อความทั้งหมดแต่งขึ้นเอง ไม่ใช่คำคมของบุคคลจริง
+    """
+    quote_en, quote_th = random.choice(ENCOURAGEMENT_QUOTES)
+    lines = [
+        "",
+        "── คุณเก่งมาก 💛 ──",
+        f'"{quote_en}"',
+        f"({quote_th})",
+    ]
+    return "\n".join(lines)
 
 
 def build_lucky_numbers_section():
@@ -619,19 +823,18 @@ def build_message():
         if lottery_block:
             lines.append(lottery_block)
 
-    if ENABLE_HOT_NUMBERS:
-        hot_numbers_block = build_hot_numbers_section()
-        if hot_numbers_block:
-            lines.append(hot_numbers_block)
-
     if ENABLE_LUCKY_NUMBER:
         today = datetime.now().date()
         days_left = (next_draw_date(today) - today).days
         if 1 <= days_left <= 7:
             lines.append(build_lucky_numbers_section())
 
-    lines.append("")
-    lines.append("ข้อมูล: Open-Meteo / Air4Thai (กรมควบคุมมลพิษ) / GLO (สำนักงานสลากกินแบ่งรัฐบาล)")
+    if ENABLE_MARKET_PRICES:
+        market_block = build_market_prices_section()
+        if market_block:
+            lines.append(market_block)
+
+    lines.append(build_encouragement_section())
 
     return "\n".join(lines)
 
