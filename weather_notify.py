@@ -26,6 +26,7 @@ weather_notify.py
 
 import os
 import sys
+import json
 import requests
 import urllib3
 from datetime import datetime, timedelta
@@ -155,9 +156,9 @@ def get_pm25():
         candidates.append((dist, station, last, pm25_info))
 
     if not candidates:
-        # [DEBUG] ไม่มีสถานีไหนมีค่า PM2.5 เป็นตัวเลขเลย พิมพ์สถานีใกล้ที่สุด 5 แห่ง
-        # (รวมที่เป็น n/a) ออกมาด้วย เพื่อช่วยวินิจฉัยปัญหาในรอบถัดไป
-        print("[DEBUG] ไม่พบสถานีที่มีค่า PM2.5 เป็นตัวเลข รายชื่อสถานีใกล้ที่สุด (รวม n/a):")
+        # [DEBUG] ไม่พบสถานีที่มีค่า PM2.5 เป็นตัวเลขเลย -> dump raw JSON ของสถานี
+        # ที่ใกล้ที่สุด 2 แห่งออกมาทั้งก้อน เพื่อดูโครงสร้างจริงว่า key ชื่ออะไรกันแน่
+        print("[DEBUG] ไม่พบสถานีที่มีค่า PM2.5 เป็นตัวเลข raw data สถานีใกล้ที่สุด 2 แห่ง:")
         all_dist = []
         for station in data.get("stations", []):
             try:
@@ -166,13 +167,10 @@ def get_pm25():
             except (KeyError, ValueError, TypeError):
                 continue
             dist = haversine(LATITUDE, LONGITUDE, lat, lon)
-            last = station.get("LastUpdate", {}) or {}
-            pm25_val = (last.get("PM25", {}) or {}).get("value", "n/a")
-            dt = last.get("DATETIMEDATA", "?")
-            all_dist.append((dist, station.get("nameTH", "?"), pm25_val, dt))
+            all_dist.append((dist, station))
         all_dist.sort(key=lambda x: x[0])
-        for dist, name, pm25_val, dt in all_dist[:5]:
-            print(f"    - {name} | ~{dist:.1f} กม. | PM2.5={pm25_val} | เวลาข้อมูลล่าสุด={dt}")
+        for dist, station in all_dist[:2]:
+            print(f"    ~{dist:.1f} กม. -> {json.dumps(station, ensure_ascii=False)}")
         return None
 
     candidates.sort(key=lambda x: x[0])
@@ -229,13 +227,8 @@ THAI_MONTHS = [
 ]
 
 
-def _format_thai_display_date(display_date_raw, fallback_iso_date=None):
-    """
-    รับ displayDate ซึ่งอาจมาเป็น:
-    - dict {"date": "16", "month": "07", "year": "2026"}  (ปี ค.ศ.)
-    - string "2026-07-16"
-    แล้วแปลงเป็น "16 กรกฎาคม 2569" (ปี พ.ศ.)
-    """
+def _extract_date_parts(display_date_raw, fallback_iso_date=None):
+    """คืนค่า (day, month, year_ce) เป็น int หรือ (None, None, None) ถ้าแปลงไม่ได้"""
     day = month = year_ce = None
 
     if isinstance(display_date_raw, dict):
@@ -253,20 +246,23 @@ def _format_thai_display_date(display_date_raw, fallback_iso_date=None):
             year_ce, month, day = parts
 
     try:
-        day_i = int(day)
-        month_i = int(month)
-        year_be = int(year_ce) + 543
-        return f"{day_i} {THAI_MONTHS[month_i]} {year_be}"
-    except (TypeError, ValueError, IndexError):
-        # แปลงไม่ได้ก็คืนค่าดิบไปแบบไม่ crash
-        return str(display_date_raw) if display_date_raw else "ไม่ทราบวันที่"
+        return int(day), int(month), int(year_ce)
+    except (TypeError, ValueError):
+        return None, None, None
+
+
+def _format_thai_date(day, month, year_ce):
+    try:
+        return f"{day} {THAI_MONTHS[month]} {year_ce + 543}"
+    except (TypeError, IndexError):
+        return "ไม่ทราบวันที่"
 
 
 def _parse_lottery_payload(payload):
     """
     ดึงข้อมูลจาก JSON ที่ GLO ส่งกลับมา
     โครงสร้างจริง (ยืนยันจาก log): payload["response"]["data"]["first"/"last2"/...]
-    และ payload["response"]["displayDate"] เป็น dict {"date","month","year"}
+    และ payload["response"]["displayDate"] เป็น dict {"date","month","year"} (ปี ค.ศ.)
     ใส่ fallback หลาย path ไว้เผื่อ GLO เปลี่ยนโครงสร้างในอนาคต
     """
     resp = payload
@@ -294,10 +290,20 @@ def _parse_lottery_payload(payload):
 
     display_date_raw = resp.get("displayDate") if isinstance(resp, dict) else None
     fallback_iso_date = resp.get("date") if isinstance(resp, dict) else None
-    display_date = _format_thai_display_date(display_date_raw, fallback_iso_date)
+    day, month, year_ce = _extract_date_parts(display_date_raw, fallback_iso_date)
+
+    date_obj = None
+    if day and month and year_ce:
+        try:
+            date_obj = datetime(year_ce, month, day).date()
+        except ValueError:
+            date_obj = None
+
+    display_date = _format_thai_date(day, month, year_ce) if date_obj else "ไม่ทราบวันที่"
 
     return {
         "display_date": display_date,
+        "date_obj": date_obj,
         "first": _extract_numbers(data.get("first")),
         "last2": _extract_numbers(data.get("last2")),
         "last3f": _extract_numbers(data.get("last3f")),
@@ -350,36 +356,40 @@ def format_lottery_block(result, heading):
 def build_lottery_section():
     """
     สร้างข้อความส่วนผลสลากกินแบ่งรัฐบาล
-    - แสดงงวดล่าสุดเสมอ
-    - ถ้าวันนี้ตรงกับวันที่ 1 หรือ 16 (วันที่สลากออกงวดใหม่) จะแนบงวดก่อนหน้ามาด้วย
-      เพื่อให้เห็นทั้งงวดใหม่และงวดก่อนหน้าในวันที่มีการเปลี่ยนงวด
+    - แสดง "เฉพาะวันที่มีการออกสลากงวดใหม่แล้วจริงๆ" เท่านั้น (เช็คว่าวันที่ของงวดล่าสุด
+      ที่ GLO ประกาศ ตรงกับวันนี้หรือไม่ ไม่ใช่แค่เช็คว่าวันนี้เป็นวันที่ 1 หรือ 16 เฉยๆ
+      เพราะเช้าของวันที่ 1/16 ผลอาจยังไม่ประกาศออกมา)
+    - ถ้าใช่ (มีงวดใหม่ออกวันนี้) จะแสดงทั้งงวดใหม่และงวดก่อนหน้าคู่กัน
+    - ถ้าวันนี้ไม่ใช่วันออกสลาก (หรืองวดใหม่ยังไม่ประกาศ) จะคืนค่า None (ไม่แสดงส่วนนี้เลย)
     """
     today = datetime.now().date()
-    lines = ["", "── สลากกินแบ่งรัฐบาล ──"]
 
     try:
         latest = get_latest_lottery()
     except Exception as e:
-        lines.append(f"⚠️ ดึงผลสลากงวดล่าสุดไม่สำเร็จ ({e})")
-        return "\n".join(lines)
+        print(f"[WARN] ดึงผลสลากงวดล่าสุดไม่สำเร็จ ({e})")
+        return None
 
     if not latest:
-        lines.append("⚠️ ไม่พบข้อมูลผลสลากงวดล่าสุด (โครงสร้าง JSON อาจเปลี่ยน ดู log สำหรับ raw data)")
-        return "\n".join(lines)
+        return None
 
+    if latest.get("date_obj") != today:
+        # วันนี้ไม่ใช่วันที่มีงวดใหม่ออก (หรือ GLO ยังไม่ประกาศผลของวันนี้) -> ไม่ต้องแสดง
+        return None
+
+    lines = ["", "── สลากกินแบ่งรัฐบาล (งวดใหม่วันนี้) ──"]
     lines += format_lottery_block(latest, f"🎟️ งวดประจำวันที่ {latest['display_date']}")
 
-    if today.day in (1, 16):
-        prev_date = previous_period_date(today)
-        try:
-            prev = get_lottery_by_date(prev_date)
-        except Exception as e:
-            print(f"[WARN] ดึงผลสลากงวดก่อนหน้าไม่สำเร็จ ({e})")
-            prev = None
+    prev_date = previous_period_date(today)
+    try:
+        prev = get_lottery_by_date(prev_date)
+    except Exception as e:
+        print(f"[WARN] ดึงผลสลากงวดก่อนหน้าไม่สำเร็จ ({e})")
+        prev = None
 
-        if prev:
-            lines.append("")
-            lines += format_lottery_block(prev, f"📌 งวดก่อนหน้า ({prev['display_date']}):")
+    if prev:
+        lines.append("")
+        lines += format_lottery_block(prev, f"📌 งวดก่อนหน้า ({prev['display_date']}):")
 
     return "\n".join(lines)
 
@@ -431,7 +441,9 @@ def build_message():
     lines.append(f"🌧️ โอกาสฝนตก: {today['precipitation_probability_max'][1]}%  (ปริมาณ ~{today['precipitation_sum'][1]} มม.)")
 
     if ENABLE_LOTTERY:
-        lines.append(build_lottery_section())
+        lottery_block = build_lottery_section()
+        if lottery_block:
+            lines.append(lottery_block)
 
     lines.append("")
     lines.append("ข้อมูล: Open-Meteo / Air4Thai (กรมควบคุมมลพิษ) / GLO (สำนักงานสลากกินแบ่งรัฐบาล)")
