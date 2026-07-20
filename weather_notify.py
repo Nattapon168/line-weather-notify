@@ -20,8 +20,12 @@ weather_notify.py
 import os
 import sys
 import requests
+import urllib3
 from datetime import datetime, timedelta
 from math import radians, sin, cos, sqrt, atan2
+
+# ปิด warning ที่เกิดจากการปิด SSL verification เฉพาะจุด (ดู get_pm25() ด้านล่าง)
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # ========== CONFIG ==========
 # อ่านค่าจาก environment variable ก่อน (ใช้กับ GitHub Actions Secrets ได้เลย)
@@ -106,7 +110,9 @@ def haversine(lat1, lon1, lat2, lon2):
 def get_pm25():
     """ดึงค่า PM2.5 จาก Air4Thai แล้วหาสถานีที่ใกล้พิกัดที่สุด"""
     url = "http://air4thai.pcd.go.th/services/getNewAQI_JSON.php"
-    r = requests.get(url, timeout=15)
+    # หมายเหตุ: เว็บ Air4Thai มีปัญหาใบรับรอง SSL ของตัวเอง (ไม่ใช่ข้อมูลอ่อนไหว
+    # จึงปิดการตรวจสอบใบรับรองเฉพาะจุดนี้เพื่อให้ดึงข้อมูลได้)
+    r = requests.get(url, timeout=15, verify=False)
     r.raise_for_status()
     data = r.json()
 
@@ -164,7 +170,12 @@ def build_message():
     tomorrow_str = today["time"][1]
 
     sun_ranges_today = estimate_sun_hours(hourly, today_str)
-    pm = get_pm25()
+
+    try:
+        pm = get_pm25()
+    except Exception as e:
+        print(f"[WARN] ดึงข้อมูล PM2.5 ไม่สำเร็จ ({e}) จะข้ามส่วนนี้ไป")
+        pm = None
 
     lines = []
     lines.append(f"🌤️ สรุปสภาพอากาศ - {LOCATION_NAME}")
