@@ -734,7 +734,7 @@ def build_encouragement_section():
     quote_en, quote_th = random.choice(ENCOURAGEMENT_QUOTES)
     lines = [
         "",
-        "── คุณเก่งมาก 💛 ──",
+        "คุณเก่ง ให้แจ้ง ข้อความให้กำลังใจ 💛 ในทุกๆวันให้กับทุกคนครับ :)",
         f'"{quote_en}"',
         f"({quote_th})",
     ]
