@@ -33,7 +33,7 @@ import time
 import requests
 import urllib3
 from collections import Counter
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 from math import radians, sin, cos, sqrt, atan2
 
 # ปิด warning ที่เกิดจากการปิด SSL verification เฉพาะจุด (ดู get_pm25() ด้านล่าง)
@@ -521,6 +521,22 @@ def build_hot_numbers_section():
 # ========== ส่วนเลขสุ่มเสี่ยงดวง (เอาฮาอย่างเดียว) ==========
 
 
+def next_draw_date(today):
+    """คืนวันที่ (datetime.date) ของงวดสลากที่จะออกถัดไป (วันที่ 1 หรือ 16 ที่ใกล้ที่สุด
+    ที่ >= today) ถ้า today ตรงกับวันออกสลากพอดี จะคืนค่า today เอง (เหลืออีก 0 วัน)"""
+    if today.day <= 1:
+        return today.replace(day=1)
+    elif today.day <= 16:
+        return today.replace(day=16)
+    else:
+        year, month = today.year, today.month
+        if month == 12:
+            year, month = year + 1, 1
+        else:
+            month += 1
+        return date(year, month, 1)
+
+
 def build_lucky_numbers_section():
     """
     คำนวณเลขท้าย 2 ตัว / 3 ตัว 'ครั้งเดียวต่อวัน' โดยอิง seed ที่รวมหลายปัจจัย
@@ -530,6 +546,7 @@ def build_lucky_numbers_section():
     ไม่มีผิดไม่มีถูก ไม่ได้อิงสถิติหรือพยากรณ์ผลจริงแต่อย่างใด เป็นความบันเทิงเท่านั้น
     """
     today_str = datetime.now().strftime("%Y-%m-%d")
+    days_left = (next_draw_date(datetime.now().date()) - datetime.now().date()).days
     # รวมหลายปัจจัยเข้าด้วยกันเป็น seed: วันที่ + พิกัด + ชื่อพื้นที่
     seed_source = f"{today_str}|{LATITUDE}|{LONGITUDE}|{LOCATION_NAME}"
     seed_hash = hashlib.sha256(seed_source.encode("utf-8")).hexdigest()
@@ -543,7 +560,7 @@ def build_lucky_numbers_section():
 
     lines = [
         "",
-        "── เลขสุ่มเสี่ยงดวงประจำวัน 🎲 (เอาฮาอย่างเดียว) ──",
+        f"── เลขสุ่มเสี่ยงดวงประจำวัน 🎲 (อีก {days_left} วัน สลากออก) ──",
         f"🔢 เลขท้าย 2 ตัว: {two_digit}",
         f"🔢 เลขท้าย 3 ตัว: {three_digit}",
         "⚠️ คำนวณครั้งเดียวต่อวัน ไม่เปลี่ยนถ้ารันซ้ำวันเดียวกัน ไม่มีผิดไม่มีถูก ไม่ได้อิงสถิติหรือพยากรณ์ผลจริงนะครับ",
@@ -608,7 +625,10 @@ def build_message():
             lines.append(hot_numbers_block)
 
     if ENABLE_LUCKY_NUMBER:
-        lines.append(build_lucky_numbers_section())
+        today = datetime.now().date()
+        days_left = (next_draw_date(today) - today).days
+        if 1 <= days_left <= 7:
+            lines.append(build_lucky_numbers_section())
 
     lines.append("")
     lines.append("ข้อมูล: Open-Meteo / Air4Thai (กรมควบคุมมลพิษ) / GLO (สำนักงานสลากกินแบ่งรัฐบาล)")
