@@ -28,6 +28,7 @@ import os
 import sys
 import json
 import random
+import hashlib
 import time
 import requests
 import urllib3
@@ -522,18 +523,30 @@ def build_hot_numbers_section():
 
 def build_lucky_numbers_section():
     """
-    สุ่มเลขท้าย 2 ตัว และเลขท้าย 3 ตัว 'เพื่อความบันเทิงเท่านั้น'
-    ใช้ random.randint ธรรมดา ไม่มีการอิงสถิติ ไม่มีการพยากรณ์ผลจริง
-    ไม่มีผิดไม่มีถูก ไม่เกี่ยวข้องกับผลสลากที่ออกจริงแต่อย่างใด
+    คำนวณเลขท้าย 2 ตัว / 3 ตัว 'ครั้งเดียวต่อวัน' โดยอิง seed ที่รวมหลายปัจจัย
+    ซึ่งคงที่ตลอดทั้งวันนั้น (วันที่ปัจจุบัน + พิกัดตำแหน่ง + ชื่อพื้นที่) แล้วแฮชรวมกัน
+    เป็นเลข seed คงที่ ผลลัพธ์จะ 'เหมือนเดิมทุกครั้ง' ที่รันซ้ำในวันเดียวกัน
+    (ไม่ว่าจะรันกี่รอบก็ตาม) แต่จะเปลี่ยนไปเองโดยอัตโนมัติเมื่อข้ามวัน
+    ไม่มีผิดไม่มีถูก ไม่ได้อิงสถิติหรือพยากรณ์ผลจริงแต่อย่างใด เป็นความบันเทิงเท่านั้น
     """
-    two_digit = f"{random.randint(0, 99):02d}"
-    three_digit = f"{random.randint(0, 999):03d}"
+    today_str = datetime.now().strftime("%Y-%m-%d")
+    # รวมหลายปัจจัยเข้าด้วยกันเป็น seed: วันที่ + พิกัด + ชื่อพื้นที่
+    seed_source = f"{today_str}|{LATITUDE}|{LONGITUDE}|{LOCATION_NAME}"
+    seed_hash = hashlib.sha256(seed_source.encode("utf-8")).hexdigest()
+    seed_int = int(seed_hash, 16)
+
+    # ใช้ random.Random instance แยกต่างหาก (ไม่แตะ global random state)
+    # เพื่อให้ผลลัพธ์เชิงกำหนด (deterministic) ตาม seed ที่คำนวณไว้
+    rng = random.Random(seed_int)
+    two_digit = f"{rng.randint(0, 99):02d}"
+    three_digit = f"{rng.randint(0, 999):03d}"
+
     lines = [
         "",
         "── เลขสุ่มเสี่ยงดวงประจำวัน 🎲 (เอาฮาอย่างเดียว) ──",
         f"🔢 เลขท้าย 2 ตัว: {two_digit}",
         f"🔢 เลขท้าย 3 ตัว: {three_digit}",
-        "⚠️ สุ่มขึ้นมาเล่นๆ ไม่มีผิดไม่มีถูก ไม่ได้อิงสถิติหรือพยากรณ์ผลจริงนะครับ",
+        "⚠️ คำนวณครั้งเดียวต่อวัน ไม่เปลี่ยนถ้ารันซ้ำวันเดียวกัน ไม่มีผิดไม่มีถูก ไม่ได้อิงสถิติหรือพยากรณ์ผลจริงนะครับ",
     ]
     return "\n".join(lines)
 
