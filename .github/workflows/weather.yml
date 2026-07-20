@@ -11,30 +11,31 @@
 # 5. เสร็จแล้ว ไปแท็บ Actions ของ repo -> เลือก workflow "Weather Notify"
 #    -> กด "Run workflow" เพื่อทดสอบรันครั้งแรกด้วยมือได้เลย
 # 6. หลังจากนั้นจะรันอัตโนมัติทุกวันตามเวลาที่ตั้งไว้ (cron ด้านล่างใช้เวลา UTC)
-
+#
+# ตารางรันของไฟล์นี้:
+#   - ทุกวัน       06:15 น. ไทย  -> พยากรณ์อากาศ + PM2.5 (ส่วนสลากจะไม่โชว์ เพราะ GLO ยังไม่ประกาศผลตอนเช้า)
+#   - วันที่ 1,16  18:15 น. ไทย  -> รอบเย็นเพิ่มเติม เพื่อให้ทันตอน GLO ประกาศผลสลากงวดใหม่แล้ว
+#     (สคริปต์ weather_notify.py จะเช็คเองว่าวันนี้มีงวดใหม่ประกาศแล้วหรือยัง ถ้ายังไม่มีก็จะไม่โชว์ส่วนสลาก)
 name: Weather Notify
-
 on:
   schedule:
-    # 23:15 UTC = 06:15 เวลาไทย (ICT = UTC+7)
+    # 23:15 UTC = 06:15 เวลาไทย (ICT = UTC+7) รันทุกวัน
     - cron: "15 23 * * *"
+    # 11:15 UTC = 18:15 เวลาไทย เฉพาะวันที่ 1 และ 16 ของเดือน (รอบเย็น เช็คผลสลากงวดใหม่)
+    - cron: "15 11 1,16 * *"
   workflow_dispatch: {}   # ทำให้กดรันเองจากหน้า Actions ได้ด้วย เพื่อทดสอบ
-
 jobs:
   send-weather:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
-
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-
       - name: Install dependencies
         run: pip install requests
-
       - name: Run weather notify script
         env:
           LINE_CHANNEL_ACCESS_TOKEN: ${{ secrets.LINE_CHANNEL_ACCESS_TOKEN }}
