@@ -155,6 +155,24 @@ def get_pm25():
         candidates.append((dist, station, last, pm25_info))
 
     if not candidates:
+        # [DEBUG] ไม่มีสถานีไหนมีค่า PM2.5 เป็นตัวเลขเลย พิมพ์สถานีใกล้ที่สุด 5 แห่ง
+        # (รวมที่เป็น n/a) ออกมาด้วย เพื่อช่วยวินิจฉัยปัญหาในรอบถัดไป
+        print("[DEBUG] ไม่พบสถานีที่มีค่า PM2.5 เป็นตัวเลข รายชื่อสถานีใกล้ที่สุด (รวม n/a):")
+        all_dist = []
+        for station in data.get("stations", []):
+            try:
+                lat = float(station["lat"])
+                lon = float(station["long"])
+            except (KeyError, ValueError, TypeError):
+                continue
+            dist = haversine(LATITUDE, LONGITUDE, lat, lon)
+            last = station.get("LastUpdate", {}) or {}
+            pm25_val = (last.get("PM25", {}) or {}).get("value", "n/a")
+            dt = last.get("DATETIMEDATA", "?")
+            all_dist.append((dist, station.get("nameTH", "?"), pm25_val, dt))
+        all_dist.sort(key=lambda x: x[0])
+        for dist, name, pm25_val, dt in all_dist[:5]:
+            print(f"    - {name} | ~{dist:.1f} กม. | PM2.5={pm25_val} | เวลาข้อมูลล่าสุด={dt}")
         return None
 
     candidates.sort(key=lambda x: x[0])
@@ -205,22 +223,65 @@ def _extract_numbers(section):
     return [n.get("value", "") for n in nums if isinstance(n, dict) and n.get("value")]
 
 
+THAI_MONTHS = [
+    "", "มกราคม", "กุมภาพันธ์", "มีนาคม", "เมษายน", "พฤษภาคม", "มิถุนายน",
+    "กรกฎาคม", "สิงหาคม", "กันยายน", "ตุลาคม", "พฤศจิกายน", "ธันวาคม",
+]
+
+
+def _format_thai_display_date(display_date_raw, fallback_iso_date=None):
+    """
+    รับ displayDate ซึ่งอาจมาเป็น:
+    - dict {"date": "16", "month": "07", "year": "2026"}  (ปี ค.ศ.)
+    - string "2026-07-16"
+    แล้วแปลงเป็น "16 กรกฎาคม 2569" (ปี พ.ศ.)
+    """
+    day = month = year_ce = None
+
+    if isinstance(display_date_raw, dict):
+        day = display_date_raw.get("date")
+        month = display_date_raw.get("month")
+        year_ce = display_date_raw.get("year")
+    elif isinstance(display_date_raw, str) and "-" in display_date_raw:
+        parts = display_date_raw.split("-")
+        if len(parts) == 3:
+            year_ce, month, day = parts
+
+    if day is None and fallback_iso_date and "-" in str(fallback_iso_date):
+        parts = str(fallback_iso_date).split("-")
+        if len(parts) == 3:
+            year_ce, month, day = parts
+
+    try:
+        day_i = int(day)
+        month_i = int(month)
+        year_be = int(year_ce) + 543
+        return f"{day_i} {THAI_MONTHS[month_i]} {year_be}"
+    except (TypeError, ValueError, IndexError):
+        # แปลงไม่ได้ก็คืนค่าดิบไปแบบไม่ crash
+        return str(display_date_raw) if display_date_raw else "ไม่ทราบวันที่"
+
+
 def _parse_lottery_payload(payload):
     """
-    พยายามดึงข้อมูลจาก JSON ที่ GLO ส่งกลับมา
-    โครงสร้างจริงอาจเป็น payload ตรงๆ, payload["data"], payload["result"]["data"]
-    หรือ payload["response"]["result"]["data"] แล้วแต่เวอร์ชัน API จึงลองไล่หลาย path
+    ดึงข้อมูลจาก JSON ที่ GLO ส่งกลับมา
+    โครงสร้างจริง (ยืนยันจาก log): payload["response"]["data"]["first"/"last2"/...]
+    และ payload["response"]["displayDate"] เป็น dict {"date","month","year"}
+    ใส่ fallback หลาย path ไว้เผื่อ GLO เปลี่ยนโครงสร้างในอนาคต
     """
+    resp = payload
+    if isinstance(payload, dict) and isinstance(payload.get("response"), dict):
+        resp = payload["response"]
+
     data = None
     for get_data in (
-        lambda p: p["response"]["result"]["data"],
-        lambda p: p["result"]["data"],
         lambda p: p["data"],
+        lambda p: p["result"]["data"],
         lambda p: p,
     ):
         try:
-            candidate = get_data(payload)
-            if isinstance(candidate, dict) and ("first" in candidate or "displayDate" in candidate):
+            candidate = get_data(resp)
+            if isinstance(candidate, dict) and "first" in candidate:
                 data = candidate
                 break
         except (KeyError, TypeError):
@@ -231,9 +292,12 @@ def _parse_lottery_payload(payload):
         print(payload)
         return None
 
+    display_date_raw = resp.get("displayDate") if isinstance(resp, dict) else None
+    fallback_iso_date = resp.get("date") if isinstance(resp, dict) else None
+    display_date = _format_thai_display_date(display_date_raw, fallback_iso_date)
+
     return {
-        "display_date": data.get("displayDate", "ไม่ทราบวันที่"),
-        "period": data.get("period", ""),
+        "display_date": display_date,
         "first": _extract_numbers(data.get("first")),
         "last2": _extract_numbers(data.get("last2")),
         "last3f": _extract_numbers(data.get("last3f")),
