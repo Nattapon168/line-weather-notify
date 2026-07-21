@@ -509,21 +509,29 @@ def build_market_prices_section():
 
     try:
         gold = get_gold_price()
-        lines.append(f"🥇 ทองคำแท่ง: รับซื้อ {gold['bar_buy']} / ขายออก {gold['bar_sell']} บาท")
-        lines.append(f"📿 ทองรูปพรรณ: รับซื้อ {gold['ornament_buy']} / ขายออก {gold['ornament_sell']} บาท")
-        lines.append(f"   (สมาคมค้าทองคำ ณ {gold['update_date']} {gold['update_time']})")
-        has_any_data = True
+        if gold["bar_buy"] not in (None, "", "n/a") or gold["ornament_buy"] not in (None, "", "n/a"):
+            lines.append(f"🥇 ทองคำแท่ง: รับซื้อ {gold['bar_buy']} / ขายออก {gold['bar_sell']} บาท")
+            lines.append(f"📿 ทองรูปพรรณ: รับซื้อ {gold['ornament_buy']} / ขายออก {gold['ornament_sell']} บาท")
+            lines.append(f"   (สมาคมค้าทองคำ ณ {gold['update_date']} {gold['update_time']})")
+            has_any_data = True
+        else:
+            # แหล่งข้อมูลต้นทาง (api.chnwt.dev) ตอบสำเร็จแต่ค่าว่างเปล่า มักเกิดจาก
+            # scraper ฝั่งเขาดึงข้อมูลจากเว็บต้นทางไม่ได้ชั่วคราว ข้ามส่วนนี้ไปเงียบๆ
+            print("[WARN] แหล่งราคาทองคำ (api.chnwt.dev) ส่งค่าว่างมา (ต้นทางน่าจะมีปัญหาชั่วคราว) ข้ามส่วนนี้ไป")
     except Exception as e:
         print(f"[WARN] ดึงราคาทองคำไม่สำเร็จ ({e})")
 
     try:
         oil = get_oil_price()
-        lines.append(
-            f"⛽ เบนซิน 95: {oil['gasoline_95']} | แก๊สโซฮอล์ 95: {oil['gasohol_95']} | "
-            f"แก๊สโซฮอล์ 91: {oil['gasohol_91']} บาท/ลิตร"
-        )
-        lines.append(f"🚛 ดีเซล: {oil['diesel']} บาท/ลิตร  (ราคาสถานี ปตท. ณ {oil['date']})")
-        has_any_data = True
+        if oil["diesel"] not in (None, "", "n/a"):
+            lines.append(
+                f"⛽ เบนซิน 95: {oil['gasoline_95']} | แก๊สโซฮอล์ 95: {oil['gasohol_95']} | "
+                f"แก๊สโซฮอล์ 91: {oil['gasohol_91']} บาท/ลิตร"
+            )
+            lines.append(f"🚛 ดีเซล: {oil['diesel']} บาท/ลิตร  (ราคาสถานี ปตท. ณ {oil['date']})")
+            has_any_data = True
+        else:
+            print("[WARN] แหล่งราคาน้ำมัน (api.chnwt.dev) ส่งค่าว่างมา (ต้นทางน่าจะมีปัญหาชั่วคราว) ข้ามส่วนนี้ไป")
     except Exception as e:
         print(f"[WARN] ดึงราคาน้ำมันไม่สำเร็จ ({e})")
 
