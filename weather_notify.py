@@ -589,10 +589,15 @@ GOLD_HEADERS = {
 }
 
 
-def get_gold_price():
+def get_gold_price_official():
     """
     ดึงราคาทองคำล่าสุดจากหน้า "การปรับเปลี่ยนระหว่างวัน" ของสมาคมค้าทองคำ (แหล่งทางการ)
     ตารางเรียงจากแถวล่าสุดอยู่บนสุด -> เก่าสุดอยู่ล่างสุด
+
+    หมายเหตุ: เว็บนี้เคยตอบ 403 Forbidden แม้ส่ง header ครบแบบเบราว์เซอร์จริงแล้ว
+    ซึ่งเข้าข่ายบล็อกระดับ IP/เครือข่าย (เช่น บล็อก IP ของ GitHub Actions) ที่แก้ด้วย header ไม่ได้
+    ถ้าเจอ 403/error ฟังก์ชันนี้จะโยน exception ออกไป แล้วให้ get_gold_price() ไป fallback
+    เป็นค่าประเมินจาก get_gold_price_estimated() แทนโดยอัตโนมัติ
     """
     session = requests.Session()
     session.headers.update(GOLD_HEADERS)
@@ -620,12 +625,73 @@ def get_gold_price():
                     "ornament_sell": cells[5],
                     "gold_spot": cells[6],
                     "usd_thb": cells[7],
+                    "estimated": False,
                 }
 
     # [DEBUG] หาแถวราคาทองไม่เจอ -> dump raw HTML ช่วงต้นไว้ดูโครงสร้างจริง
     print("[DEBUG] หาแถวราคาทองล่าสุดจาก goldtraders.or.th ไม่เจอ raw HTML (2000 ตัวแรก):")
     print(r.text[:2000])
     return None
+
+
+# ========== ราคาทอง (สำรอง) - คำนวณจากราคาทองคำโลกเมื่อดึงจากสมาคมค้าทองคำไม่ได้ ==========
+# ใช้ gold-api.com (ฟรี ไม่ต้องใช้ key ไม่จำกัด rate limit ออกแบบมาให้เรียกจากเซิร์ฟเวอร์ได้)
+# ดึงราคาทองคำโลก (USD ต่อทรอยออนซ์) แล้วแปลงเป็นราคาทองคำแท่งไทยด้วยสูตรมาตรฐานที่วงการค้าทองใช้กัน:
+#   1 บาททองคำ = 15.244 กรัม, ความบริสุทธิ์ทองคำแท่งไทย = 96.5%
+# ตัวเลขที่ได้เป็น "ค่าประเมิน" อาจคลาดเคลื่อนจากราคาสมาคมค้าทองคำจริงได้บ้าง (ไม่รวมส่วนต่างกำไรร้านทอง)
+# แต่ใช้งานได้เสมอเพราะไม่ต้อง scrape เว็บที่อาจโดนบล็อก
+
+GOLD_API_URL = "https://api.gold-api.com/price/XAU"
+TROY_OZ_TO_GRAM = 31.1034768
+THAI_BAHT_WEIGHT_GRAM = 15.244
+THAI_GOLD_BAR_PURITY = 0.965
+
+
+def get_gold_price_estimated():
+    """คำนวณราคาทองคำแท่งไทยโดยประมาณ จากราคาทองคำโลก (gold-api.com) + อัตราแลกเปลี่ยน USD/THB"""
+    r = requests.get(GOLD_API_URL, timeout=15)
+    r.raise_for_status()
+    spot_usd_per_oz = r.json().get("price")
+    if spot_usd_per_oz is None:
+        return None
+
+    fx = get_usd_thb_rate()
+    if not fx:
+        return None
+
+    bar_price = (
+        float(spot_usd_per_oz) / TROY_OZ_TO_GRAM * THAI_BAHT_WEIGHT_GRAM
+        * THAI_GOLD_BAR_PURITY * fx["rate"]
+    )
+    return {
+        "update_datetime": datetime.now().strftime("%d/%m/%Y %H:%M"),
+        "bar_buy": f"{bar_price:,.0f}",
+        "bar_sell": f"{bar_price:,.0f}",
+        "ornament_buy": "n/a",
+        "ornament_sell": "n/a",
+        "gold_spot": f"{spot_usd_per_oz:,.2f}",
+        "usd_thb": fx["rate"],
+        "estimated": True,
+    }
+
+
+def get_gold_price():
+    """
+    ลองดึงราคาทองคำแท่งทางการจากสมาคมค้าทองคำก่อนเป็นอันดับแรก
+    ถ้าล้มเหลว (เช่น โดนบล็อก 403) จะ fallback ไปใช้ค่าประเมินจากราคาทองคำโลกแทนโดยอัตโนมัติ
+    """
+    try:
+        result = get_gold_price_official()
+        if result:
+            return result
+    except Exception as e:
+        print(f"[WARN] ดึงราคาทองทางการจากสมาคมค้าทองคำไม่สำเร็จ ({e}) จะลองใช้ค่าประเมินแทน")
+
+    try:
+        return get_gold_price_estimated()
+    except Exception as e:
+        print(f"[WARN] คำนวณราคาทองประเมินจาก gold-api.com ก็ไม่สำเร็จเช่นกัน ({e})")
+        return None
 
 
 # ========== ส่วนราคาน้ำมัน (บางจาก - API ทางการ) ==========
@@ -698,9 +764,16 @@ def build_market_prices_section():
     try:
         gold = get_gold_price()
         if gold and gold["bar_buy"] not in (None, "", "n/a"):
-            lines.append(f"🥇 ทองคำแท่ง: รับซื้อ {gold['bar_buy']} / ขายออก {gold['bar_sell']} บาท")
-            lines.append(f"📿 ทองรูปพรรณ: ขายออก {gold['ornament_sell']} บาท")
-            lines.append(f"   (สมาคมค้าทองคำ ณ {gold['update_datetime']} น.)")
+            if gold.get("estimated"):
+                lines.append(f"🥇 ทองคำแท่ง (ประเมิน): ~{gold['bar_buy']} บาท")
+                lines.append(
+                    f"   (คำนวณจากราคาทองคำโลก {gold['gold_spot']} USD/oz x USD/THB {gold['usd_thb']} "
+                    f"ณ {gold['update_datetime']} น. — ไม่ใช่ราคาสมาคมค้าทองคำจริง ดูราคาทางการที่ goldtraders.or.th)"
+                )
+            else:
+                lines.append(f"🥇 ทองคำแท่ง: รับซื้อ {gold['bar_buy']} / ขายออก {gold['bar_sell']} บาท")
+                lines.append(f"📿 ทองรูปพรรณ: ขายออก {gold['ornament_sell']} บาท")
+                lines.append(f"   (สมาคมค้าทองคำ ณ {gold['update_datetime']} น.)")
             has_any_data = True
         else:
             print("[WARN] แหล่งราคาทองคำ (goldtraders.or.th) ส่งค่าว่างมา ข้ามส่วนนี้ไป")
