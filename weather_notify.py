@@ -323,7 +323,6 @@ def build_storm_section():
         # ประกาศล่าสุดไม่มีชื่อพายุระบุ (มักเป็นประกาศมรสุม/คลื่นลมแรงทั่วไป ไม่ใช่พายุหมุนเขตร้อนที่ตั้งชื่อ)
         lines.append("ขณะนี้ยังไม่มีพายุหมุนเขตร้อนที่มีชื่อส่งผลกระทบโดยตรง")
         lines.append(f"(อ้างอิงประกาศล่าสุดจากกรมอุตุนิยมวิทยา: {headline})")
-        lines.append(f"ที่มา: {url}")
         return "\n".join(lines)
 
     storm_name_th = name_match.group(1).strip()
@@ -348,12 +347,11 @@ def build_storm_section():
         if date_text:
             lines.append(f"📅 ช่วงวันที่มีผลกระทบ (เข้า-ออก): {date_text}")
         else:
-            lines.append("📅 ช่วงวันที่มีผลกระทบ: ยังไม่พบช่วงวันที่ชัดเจนในเนื้อหา ดูรายละเอียดตามลิงก์")
+            lines.append("📅 ช่วงวันที่มีผลกระทบ: ยังไม่พบช่วงวันที่ชัดเจนในเนื้อหาประกาศ")
         lines.append("⚠️ ตามประกาศ มีผลกระทบต่อภาคเหนือ")
     else:
         lines.append(f"ชื่อพายุ: {storm_label} (ยังไม่ระบุผลกระทบต่อภาคเหนือชัดเจนในประกาศล่าสุด)")
 
-    lines.append(f"ที่มา: {url}")
     return "\n".join(lines)
 
 
