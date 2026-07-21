@@ -322,7 +322,6 @@ def build_storm_section():
     if not name_match:
         # ประกาศล่าสุดไม่มีชื่อพายุระบุ (มักเป็นประกาศมรสุม/คลื่นลมแรงทั่วไป ไม่ใช่พายุหมุนเขตร้อนที่ตั้งชื่อ)
         lines.append("ขณะนี้ยังไม่มีพายุหมุนเขตร้อนที่มีชื่อส่งผลกระทบโดยตรง")
-        lines.append(f"(อ้างอิงประกาศล่าสุดจากกรมอุตุนิยมวิทยา: {headline})")
         return "\n".join(lines)
 
     storm_name_th = name_match.group(1).strip()
@@ -768,7 +767,7 @@ def build_market_prices_section():
                 lines.append(f"🥇 ทองคำแท่ง (ประเมิน): ~{gold['bar_buy']} บาท")
                 lines.append(
                     f"   (คำนวณจากราคาทองคำโลก {gold['gold_spot']} USD/oz x USD/THB {gold['usd_thb']} "
-                    f"ณ {gold['update_datetime']} น. — ไม่ใช่ราคาสมาคมค้าทองคำจริง ดูราคาทางการที่ goldtraders.or.th)"
+                    f"ณ {gold['update_datetime']} น.)"
                 )
             else:
                 lines.append(f"🥇 ทองคำแท่ง: รับซื้อ {gold['bar_buy']} / ขายออก {gold['bar_sell']} บาท")
