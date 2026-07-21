@@ -572,7 +572,21 @@ def next_draw_date(today):
 # ซึ่งเป็นเว็บเก่าที่ยัง render ราคาฝั่ง server ตรงๆ ไม่ต้องพึ่ง JavaScript เหมือนเว็บใหม่
 # (เว็บใหม่ newgta.goldtraders.or.th โหลดข้อมูลผ่าน JS หลัง page load ดึงด้วย requests เฉยๆ ไม่ได้)
 
+GOLD_BASE_URL = "https://classic.goldtraders.or.th/"
 GOLD_URL = "https://classic.goldtraders.or.th/UpdatePriceList.aspx"
+
+# [แก้ไข] เดิมส่งแค่ User-Agent อย่างเดียว โดนเว็บเช็คว่าไม่ใช่เบราว์เซอร์จริง -> ตอบ 403 Forbidden
+# แก้เป็นส่ง header ให้ครบแบบเบราว์เซอร์จริง (Accept, Accept-Language, Referer) และใช้ Session
+# โหลดหน้าแรกของเว็บก่อน 1 ครั้ง เพื่อให้ได้ cookie ผ่าน bot-check เบื้องต้นก่อนค่อยไปหน้าตารางราคา
+GOLD_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+    ),
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+    "Accept-Language": "th-TH,th;q=0.9,en-US;q=0.8,en;q=0.7",
+    "Referer": GOLD_BASE_URL,
+}
 
 
 def get_gold_price():
@@ -580,7 +594,15 @@ def get_gold_price():
     ดึงราคาทองคำล่าสุดจากหน้า "การปรับเปลี่ยนระหว่างวัน" ของสมาคมค้าทองคำ (แหล่งทางการ)
     ตารางเรียงจากแถวล่าสุดอยู่บนสุด -> เก่าสุดอยู่ล่างสุด
     """
-    r = requests.get(GOLD_URL, timeout=15, headers={"User-Agent": "Mozilla/5.0"})
+    session = requests.Session()
+    session.headers.update(GOLD_HEADERS)
+    # โหลดหน้าแรกก่อน 1 ครั้ง เพื่อให้ session มี cookie เหมือนเบราว์เซอร์จริงเข้าเว็บตามลำดับ
+    try:
+        session.get(GOLD_BASE_URL, timeout=15)
+    except requests.RequestException:
+        pass  # ถ้าหน้าแรกโหลดไม่ได้ก็ยังลองยิงหน้าตารางราคาต่อได้อยู่ดี
+
+    r = session.get(GOLD_URL, timeout=15)
     r.raise_for_status()
     soup = BeautifulSoup(r.text, "html.parser")
 
