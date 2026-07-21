@@ -1,12 +1,17 @@
 #!/usr/bin/env python3
 """
 weather_notify.py
-ดึงข้อมูลสภาพอากาศ + PM2.5 + ผลสลากกินแบ่งรัฐบาล แล้วส่งสรุปเข้า LINE กลุ่ม (บอทที่ 2)
+ดึงข้อมูลสภาพอากาศ + พายุที่กำลังเข้าไทย + PM2.5 + ผลสลากกินแบ่งรัฐบาล + ราคาทอง/น้ำมัน/ค่าเงิน
+แล้วส่งสรุปเข้า LINE กลุ่ม (บอทที่ 2)
 
 แหล่งข้อมูล:
 - อุณหภูมิ / พยากรณ์ล่วงหน้า / ปริมาณฝน / เวลาพระอาทิตย์ขึ้น-ตก : Open-Meteo (ไม่ต้องใช้ API key)
+- พายุที่กำลังเข้าไทย : กรมอุตุนิยมวิทยา (tmd.go.th) - ประกาศเตือนภัยลักษณะอากาศ (ไม่ต้องใช้ API key)
 - PM2.5 / AQI : Air4Thai - กรมควบคุมมลพิษ (ไม่ต้องใช้ API key)
 - ผลสลากกินแบ่งรัฐบาล : GLO - สำนักงานสลากกินแบ่งรัฐบาล (ไม่ต้องใช้ API key)
+- ราคาทองคำ : สมาคมค้าทองคำ (goldtraders.or.th - เว็บ classic) (ไม่ต้องใช้ API key)
+- ราคาน้ำมัน : บางจาก คอร์ปอเรชั่น - API ทางการสำหรับเชื่อมโยงราคาน้ำมัน (ไม่ต้องใช้ API key)
+- อัตราแลกเปลี่ยน USD/THB : open.er-api.com (ไม่ต้องใช้ API key)
 - ส่งเข้า LINE : LINE Messaging API (push message) ใช้ Channel Access Token ของ OA ตัวที่ 2
 
 วิธีใช้:
@@ -17,11 +22,20 @@ weather_notify.py
 5. รันด้วยมือก่อนเพื่อทดสอบ: python3 weather_notify.py
 6. ถ้าโอเค ค่อยตั้ง cron / GitHub Actions ให้รันอัตโนมัติทุกเช้า (ดูตัวอย่างท้ายไฟล์)
 
+ติดตั้ง dependency ก่อนรัน:
+    pip install requests beautifulsoup4
+
 หมายเหตุเกี่ยวกับสลากกินแบ่งรัฐบาล (GLO API):
 - API ของ GLO เป็น endpoint ที่ไม่มีเอกสารทางการแบบละเอียด (พบจาก Data Catalog ของ GLO เอง)
   โครงสร้าง JSON ที่ตอบกลับมาอาจเปลี่ยนแปลงได้โดยไม่แจ้งล่วงหน้า
 - โค้ดด้านล่างพยายาม parse ด้วยหลาย path ป้องกัน error ไว้แล้ว แต่ถ้ารันแล้วได้ "โครงสร้างข้อมูลไม่ตรงตามที่คาด"
   ให้ดูใน log ที่ print raw JSON ออกมา แล้วส่งกลับมาให้ปรับโค้ดเพิ่มได้
+
+หมายเหตุเกี่ยวกับหัวข้อพายุ:
+- ดึงจากหน้าประกาศเตือนภัยลักษณะอากาศของกรมอุตุนิยมวิทยา (tmd.go.th) ซึ่งเป็นข้อความภาษาธรรมชาติ
+  (ไม่ใช่ JSON structured) โค้ดจึงใช้การจับคู่รูปแบบข้อความ (regex) แบบ best-effort
+  ถ้ารูปแบบประกาศเปลี่ยนไปมากจน parse ไม่ได้ จะ fallback ไปแสดงแค่หัวข้อประกาศล่าสุดเฉยๆ พร้อมลิงก์
+  ให้ไปอ่านรายละเอียดเอง (ไม่ปล่อยให้ทั้งข้อความพัง)
 """
 
 import os
@@ -29,8 +43,10 @@ import sys
 import json
 import random
 import hashlib
+import re
 import requests
 import urllib3
+from bs4 import BeautifulSoup
 from datetime import datetime, timedelta, date
 from math import radians, sin, cos, sqrt, atan2
 
@@ -48,13 +64,10 @@ LATITUDE = float(os.environ.get("WEATHER_LAT", 18.8488))
 LONGITUDE = float(os.environ.get("WEATHER_LON", 99.0446))
 LOCATION_NAME = os.environ.get("WEATHER_LOCATION_NAME", "อำเภอสันทราย จ.เชียงใหม่ 50210")
 
-# เปิด/ปิดส่วนสลากกินแบ่งรัฐบาล (ตั้งเป็น "0" ถ้าไม่ต้องการให้ดึงส่วนนี้)
+# เปิด/ปิดแต่ละส่วน (ตั้งเป็น "0" ถ้าไม่ต้องการให้ดึงส่วนนั้น)
+ENABLE_STORM = os.environ.get("ENABLE_STORM", "1") != "0"
 ENABLE_LOTTERY = os.environ.get("ENABLE_LOTTERY", "1") != "0"
-
-# เปิด/ปิดส่วนเลขสุ่มเสี่ยงดวง (เอาฮาอย่างเดียว ไม่เกี่ยวกับผลจริง)
 ENABLE_LUCKY_NUMBER = os.environ.get("ENABLE_LUCKY_NUMBER", "1") != "0"
-
-# เปิด/ปิดส่วนราคาทอง/น้ำมัน/ค่าเงิน (แสดงคู่กับพยากรณ์อากาศทุกวัน)
 ENABLE_MARKET_PRICES = os.environ.get("ENABLE_MARKET_PRICES", "1") != "0"
 
 if not LINE_CHANNEL_ACCESS_TOKEN or not LINE_GROUP_ID:
@@ -209,6 +222,139 @@ def aqi_level_text(pm25_value):
         return "เริ่มมีผลต่อสุขภาพ 🟠"
     else:
         return "อันตราย 🔴"
+
+
+# ========== ส่วนพายุที่กำลังเข้าประเทศไทย (เน้นภาคเหนือ) ==========
+# ดึงจากหน้าประกาศเตือนภัยลักษณะอากาศของกรมอุตุนิยมวิทยา (tmd.go.th) - แหล่งทางการ
+# หน้ารายการเรียงจากประกาศล่าสุดอยู่บนสุด และเป็นข้อความภาษาธรรมชาติ ไม่ใช่ JSON structured
+# จึงใช้ regex จับคู่รูปแบบแบบ best-effort พร้อม fallback ให้เสมอ
+
+TMD_STORM_LIST_URL = "https://www.tmd.go.th/warning-and-events/warning-storm"
+
+# รูปแบบหัวข้อ/เนื้อหาที่มักพบ เช่น  พายุโซนร้อน "ไมสัก" (MAYSAK)
+STORM_NAME_RE = re.compile(r'พายุ[^“”"\n]{0,20}[“"]([^”"]+)[”"]\s*\(?([A-Za-z]+)?\)?')
+
+NORTH_KEYWORD = "ภาคเหนือ"
+NO_LANDFALL_KEYWORDS = [
+    "ไม่เคลื่อนเข้าสู่ประเทศไทย",
+    "ไม่เข้าสู่ประเทศไทย",
+    "สลายตัว",
+    "อ่อนกำลังลงเป็นหย่อมความกดอากาศต่ำ",
+]
+
+THAI_MONTHS_TEXT = [
+    "มกราคม", "กุมภาพันธ์", "มีนาคม", "เมษายน", "พฤษภาคม", "มิถุนายน",
+    "กรกฎาคม", "สิงหาคม", "กันยายน", "ตุลาคม", "พฤศจิกายน", "ธันวาคม",
+    "ม.ค.", "ก.พ.", "มี.ค.", "เม.ย.", "พ.ค.", "มิ.ย.",
+    "ก.ค.", "ส.ค.", "ก.ย.", "ต.ค.", "พ.ย.", "ธ.ค.",
+]
+
+# จับช่วงวันที่แบบ "4–6 กรกฎาคม 2569" หรือ "4 - 6 ก.ค. 69"
+DATE_RANGE_RE = re.compile(
+    r"(\d{1,2})\s*[-–]\s*(\d{1,2})\s*(" + "|".join(THAI_MONTHS_TEXT) + r")\.?\s*(\d{2,4})"
+)
+
+
+def get_latest_storm_bulletin():
+    """
+    ดึงประกาศเตือนภัยลักษณะอากาศล่าสุดจากกรมอุตุนิยมวิทยา
+    คืนค่า (headline, url, full_text) ของประกาศล่าสุด หรือ None ถ้าดึงไม่สำเร็จ
+    """
+    r = requests.get(TMD_STORM_LIST_URL, timeout=15, headers={"User-Agent": "Mozilla/5.0"})
+    r.raise_for_status()
+    soup = BeautifulSoup(r.text, "html.parser")
+
+    latest_link = None
+    latest_headline = None
+    for a in soup.find_all("a", href=True):
+        href = a["href"]
+        text = a.get_text(strip=True)
+        # ลิงก์ประกาศแต่ละฉบับจะมี path /warning-and-events/warning-storm/<slug>
+        # กรองด้วยความยาวข้อความ กันไปโดนลิงก์เมนู/ปุ่มทั่วไปที่ข้อความสั้นเกินไป
+        if "/warning-and-events/warning-storm/" in href and len(text) > 15:
+            latest_link = href
+            latest_headline = text
+            break  # ตัวแรกที่เจอในหน้า = ประกาศล่าสุด (หน้าเรียงใหม่สุดไว้บนสุด)
+
+    if not latest_link:
+        print("[DEBUG] หาลิงก์ประกาศเตือนภัยพายุล่าสุดจาก TMD ไม่เจอ raw HTML (2000 ตัวแรก):")
+        print(r.text[:2000])
+        return None
+
+    if not latest_link.startswith("http"):
+        latest_link = "https://www.tmd.go.th" + latest_link
+
+    full_text = latest_headline
+    try:
+        r2 = requests.get(latest_link, timeout=15, headers={"User-Agent": "Mozilla/5.0"})
+        r2.raise_for_status()
+        detail_soup = BeautifulSoup(r2.text, "html.parser")
+        full_text = detail_soup.get_text(" ", strip=True)
+    except Exception as e:
+        print(f"[WARN] ดึงเนื้อหาประกาศฉบับเต็มไม่สำเร็จ ({e}) จะใช้แค่หัวข้อแทน")
+
+    return latest_headline, latest_link, full_text
+
+
+def build_storm_section():
+    """
+    สรุปพายุหมุนเขตร้อนที่กำลังส่งผลกระทบต่อประเทศไทย (เน้นภาคเหนือ) จากประกาศล่าสุดของกรมอุตุนิยมวิทยา
+    - มีชื่อพายุ (ในเครื่องหมายคำพูด เช่น "ไมสัก") + เนื้อหากล่าวถึง "ภาคเหนือ"
+      -> โชว์ชื่อพายุ + ช่วงวันที่ (ถ้าหาเจอในเนื้อหา) + แจ้งว่ากระทบภาคเหนือ
+    - มีชื่อพายุ แต่ไม่ได้เข้าไทย/สลายตัว/ไม่ระบุผลกระทบภาคเหนือ -> แจ้งสถานะแบบสั้นๆ พร้อมลิงก์
+    - ประกาศล่าสุดไม่มีชื่อพายุเลย (เช่น เป็นประกาศมรสุม/คลื่นลมแรงทั่วไป) -> แจ้งว่าไม่มีพายุหมุนเขตร้อนในขณะนี้
+    - ดึงข้อมูลไม่สำเร็จเลย -> คืนค่า None (ไม่แสดงหัวข้อนี้ ไม่ทำให้ข้อความอื่นพัง)
+    """
+    try:
+        result = get_latest_storm_bulletin()
+    except Exception as e:
+        print(f"[WARN] ดึงประกาศเตือนภัยพายุจาก TMD ไม่สำเร็จ ({e})")
+        return None
+
+    if not result:
+        return None
+
+    headline, url, full_text = result
+    lines = ["🌀 พายุที่กำลังเข้าประเทศไทย (ผลกระทบภาคเหนือ)"]
+
+    name_match = STORM_NAME_RE.search(full_text) or STORM_NAME_RE.search(headline)
+
+    if not name_match:
+        # ประกาศล่าสุดไม่มีชื่อพายุระบุ (มักเป็นประกาศมรสุม/คลื่นลมแรงทั่วไป ไม่ใช่พายุหมุนเขตร้อนที่ตั้งชื่อ)
+        lines.append("ขณะนี้ยังไม่มีพายุหมุนเขตร้อนที่มีชื่อส่งผลกระทบโดยตรง")
+        lines.append(f"(อ้างอิงประกาศล่าสุดจากกรมอุตุนิยมวิทยา: {headline})")
+        lines.append(f"ที่มา: {url}")
+        return "\n".join(lines)
+
+    storm_name_th = name_match.group(1).strip()
+    storm_name_en = (name_match.group(2) or "").strip()
+    storm_label = storm_name_th + (f" ({storm_name_en})" if storm_name_en else "")
+
+    affects_north = NORTH_KEYWORD in full_text
+    no_landfall = any(kw in full_text for kw in NO_LANDFALL_KEYWORDS)
+
+    date_match = DATE_RANGE_RE.search(full_text)
+    date_text = None
+    if date_match:
+        d1, d2, month, year_th = date_match.groups()
+        # ปีในประกาศเป็น พ.ศ. อยู่แล้ว (เช่น 2569) ใส่ตามที่เจอได้เลย
+        year_display = year_th if len(year_th) == 4 else f"25{year_th}"
+        date_text = f"{d1}-{d2} {month} {year_display}"
+
+    if no_landfall and not affects_north:
+        lines.append(f"พายุ {storm_label} ไม่เคลื่อนเข้าสู่ประเทศไทยโดยตรง (ไม่กระทบภาคเหนือ)")
+    elif affects_north:
+        lines.append(f"ชื่อพายุ: {storm_label}")
+        if date_text:
+            lines.append(f"📅 ช่วงวันที่มีผลกระทบ (เข้า-ออก): {date_text}")
+        else:
+            lines.append("📅 ช่วงวันที่มีผลกระทบ: ยังไม่พบช่วงวันที่ชัดเจนในเนื้อหา ดูรายละเอียดตามลิงก์")
+        lines.append("⚠️ ตามประกาศ มีผลกระทบต่อภาคเหนือ")
+    else:
+        lines.append(f"ชื่อพายุ: {storm_label} (ยังไม่ระบุผลกระทบต่อภาคเหนือชัดเจนในประกาศล่าสุด)")
+
+    lines.append(f"ที่มา: {url}")
+    return "\n".join(lines)
 
 
 # ========== ส่วนสลากกินแบ่งรัฐบาล (GLO) ==========
@@ -422,64 +568,86 @@ def next_draw_date(today):
         return date(year, month, 1)
 
 
-# ========== ส่วนราคาทอง / น้ำมัน / ค่าเงิน ==========
-# ใช้ API สาธารณะฟรี ไม่ต้องใช้ API key (ทดสอบเชื่อมต่อจริงไม่ได้จากเครื่อง dev
-# เพราะโดเมนเหล่านี้ไม่อยู่ใน network allowlist ที่นี่ แต่ครอบ try/except ไว้ให้ครบ)
+# ========== ส่วนราคาทอง (สมาคมค้าทองคำ - ทางการ) ==========
+# [แก้ไข] เดิมใช้ api.chnwt.dev ซึ่งพังแล้ว (ต้นทางที่เขา crawl เปลี่ยนโครงสร้าง ทำให้ได้ค่าว่างเปล่าทุกครั้ง)
+# เปลี่ยนมาดึงตรงจากหน้า "การปรับเปลี่ยนระหว่างวัน" ของสมาคมค้าทองคำ (classic.goldtraders.or.th)
+# ซึ่งเป็นเว็บเก่าที่ยัง render ราคาฝั่ง server ตรงๆ ไม่ต้องพึ่ง JavaScript เหมือนเว็บใหม่
+# (เว็บใหม่ newgta.goldtraders.or.th โหลดข้อมูลผ่าน JS หลัง page load ดึงด้วย requests เฉยๆ ไม่ได้)
+
+GOLD_URL = "https://classic.goldtraders.or.th/UpdatePriceList.aspx"
 
 
 def get_gold_price():
-    """ดึงราคาทองคำล่าสุด (crawl มาจาก goldtraders.or.th ผ่าน api.chnwt.dev ฟรี ไม่ต้องใช้ key)"""
-    url = "https://api.chnwt.dev/thai-gold-api/latest"
-    r = requests.get(url, timeout=15)
+    """
+    ดึงราคาทองคำล่าสุดจากหน้า "การปรับเปลี่ยนระหว่างวัน" ของสมาคมค้าทองคำ (แหล่งทางการ)
+    ตารางเรียงจากแถวล่าสุดอยู่บนสุด -> เก่าสุดอยู่ล่างสุด
+    """
+    r = requests.get(GOLD_URL, timeout=15, headers={"User-Agent": "Mozilla/5.0"})
     r.raise_for_status()
-    data = r.json()
-    resp = data.get("response", {}) or {}
-    price = resp.get("price", {}) or {}
-    result = {
-        "update_date": resp.get("update_date", "?"),
-        "update_time": resp.get("update_time", "?"),
-        "ornament_buy": (price.get("gold") or {}).get("buy", "n/a"),
-        "ornament_sell": (price.get("gold") or {}).get("sell", "n/a"),
-        "bar_buy": (price.get("gold_bar") or {}).get("buy", "n/a"),
-        "bar_sell": (price.get("gold_bar") or {}).get("sell", "n/a"),
-    }
-    # [DEBUG] ถ้า parse ออกมาแล้วว่างเปล่า ให้ dump raw JSON เต็มๆ ออกมาดู
-    # โครงสร้างจริงว่าต่างจากที่คาดไว้ตรงไหน
-    if not any([result["ornament_buy"] not in (None, "", "n/a"),
-                result["bar_buy"] not in (None, "", "n/a")]):
-        print("[DEBUG] ราคาทองคำ parse ได้ค่าว่าง raw JSON จาก api.chnwt.dev/thai-gold-api/latest:")
-        print(json.dumps(data, ensure_ascii=False))
-    return result
+    soup = BeautifulSoup(r.text, "html.parser")
+
+    date_re = re.compile(r"^\d{2}/\d{2}/\d{4}")
+    for table in soup.find_all("table"):
+        for tr in table.find_all("tr"):
+            cells = [td.get_text(strip=True) for td in tr.find_all("td")]
+            # แถวข้อมูลจริง: อย่างน้อย 9 คอลัมน์ และคอลัมน์แรกขึ้นต้นด้วยวันที่ dd/mm/yyyy
+            if len(cells) >= 9 and date_re.match(cells[0]):
+                return {
+                    "update_datetime": cells[0],  # เช่น "21/07/2569 12:47"
+                    "bar_buy": cells[2],
+                    "bar_sell": cells[3],
+                    "ornament_buy": cells[4],
+                    "ornament_sell": cells[5],
+                    "gold_spot": cells[6],
+                    "usd_thb": cells[7],
+                }
+
+    # [DEBUG] หาแถวราคาทองไม่เจอ -> dump raw HTML ช่วงต้นไว้ดูโครงสร้างจริง
+    print("[DEBUG] หาแถวราคาทองล่าสุดจาก goldtraders.or.th ไม่เจอ raw HTML (2000 ตัวแรก):")
+    print(r.text[:2000])
+    return None
+
+
+# ========== ส่วนราคาน้ำมัน (บางจาก - API ทางการ) ==========
+# [แก้ไข] เดิมใช้ api.chnwt.dev ซึ่งพังแล้วเช่นกัน (ต้นทางเปลี่ยนโครงสร้าง)
+# เปลี่ยนมาใช้ API ทางการของบางจากที่เปิดให้นำราคาน้ำมันไปแสดงบนเว็บ/แอปของตัวเองได้โดยเฉพาะ
+# (ดูรายละเอียดที่ https://www.bangchak.co.th/th/oilprice หัวข้อ "การเชื่อมโยงราคาน้ำมัน")
+
+OIL_API_URL = "https://oil-price.bangchak.co.th/ApiOilPrice2/th"
 
 
 def get_oil_price():
-    """
-    ดึงราคาน้ำมันล่าสุด (crawl มาจาก gasprice.kapook.com ผ่าน api.chnwt.dev ฟรี ไม่ต้องใช้ key)
-    เลือกใช้ราคาสถานี ปตท. เป็นตัวแทน (station key 'ptt')
-    """
-    url = "https://api.chnwt.dev/thai-oil-api/latest"
-    r = requests.get(url, timeout=15)
+    """ดึงราคาน้ำมันขายปลีกล่าสุดจาก API ทางการของบางจาก"""
+    r = requests.get(OIL_API_URL, timeout=15)
     r.raise_for_status()
     data = r.json()
-    resp = data.get("response", {}) or {}
-    stations = resp.get("stations", {}) or {}
-    ptt = stations.get("ptt", {}) or {}
+    if not data:
+        return None
 
-    def _price(key):
-        return (ptt.get(key) or {}).get("price", "n/a")
+    entry = data[0]
+    try:
+        oil_list = json.loads(entry.get("OilList") or "[]")
+    except (TypeError, ValueError):
+        print("[DEBUG] parse OilList จาก Bangchak API ไม่ได้ raw entry:")
+        print(json.dumps(entry, ensure_ascii=False))
+        return None
 
-    result = {
-        "date": resp.get("date", "?"),
-        "gasoline_95": _price("gasoline_95"),
-        "gasohol_95": _price("gasohol_95"),
-        "gasohol_91": _price("gasohol_91"),
-        "diesel": _price("diesel"),
+    prices = {item.get("OilName", ""): item.get("PriceToday") for item in oil_list}
+
+    def find_price(keyword):
+        for name, price in prices.items():
+            if keyword in name:
+                return price
+        return "n/a"
+
+    return {
+        "date": entry.get("OilPriceDate", "?"),
+        "diesel_b20": find_price("ดีเซล B20"),
+        "hi_diesel": find_price("ไฮดีเซล"),
+        "gasohol_91": find_price("แก๊สโซฮอล์ 91"),
+        "gasohol_95": find_price("แก๊สโซฮอล์ 95"),
+        "premium_98": find_price("98"),
     }
-    # [DEBUG] ถ้า parse ออกมาแล้วว่างเปล่า ให้ dump raw JSON เต็มๆ ออกมาดู
-    if result["diesel"] in (None, "", "n/a"):
-        print("[DEBUG] ราคาน้ำมัน parse ได้ค่าว่าง raw JSON จาก api.chnwt.dev/thai-oil-api/latest:")
-        print(json.dumps(data, ensure_ascii=False))
-    return result
 
 
 def get_usd_thb_rate():
@@ -509,29 +677,29 @@ def build_market_prices_section():
 
     try:
         gold = get_gold_price()
-        if gold["bar_buy"] not in (None, "", "n/a") or gold["ornament_buy"] not in (None, "", "n/a"):
+        if gold and gold["bar_buy"] not in (None, "", "n/a"):
             lines.append(f"🥇 ทองคำแท่ง: รับซื้อ {gold['bar_buy']} / ขายออก {gold['bar_sell']} บาท")
-            lines.append(f"📿 ทองรูปพรรณ: รับซื้อ {gold['ornament_buy']} / ขายออก {gold['ornament_sell']} บาท")
-            lines.append(f"   (สมาคมค้าทองคำ ณ {gold['update_date']} {gold['update_time']})")
+            lines.append(f"📿 ทองรูปพรรณ: ขายออก {gold['ornament_sell']} บาท")
+            lines.append(f"   (สมาคมค้าทองคำ ณ {gold['update_datetime']} น.)")
             has_any_data = True
         else:
-            # แหล่งข้อมูลต้นทาง (api.chnwt.dev) ตอบสำเร็จแต่ค่าว่างเปล่า มักเกิดจาก
-            # scraper ฝั่งเขาดึงข้อมูลจากเว็บต้นทางไม่ได้ชั่วคราว ข้ามส่วนนี้ไปเงียบๆ
-            print("[WARN] แหล่งราคาทองคำ (api.chnwt.dev) ส่งค่าว่างมา (ต้นทางน่าจะมีปัญหาชั่วคราว) ข้ามส่วนนี้ไป")
+            print("[WARN] แหล่งราคาทองคำ (goldtraders.or.th) ส่งค่าว่างมา ข้ามส่วนนี้ไป")
     except Exception as e:
         print(f"[WARN] ดึงราคาทองคำไม่สำเร็จ ({e})")
 
     try:
         oil = get_oil_price()
-        if oil["diesel"] not in (None, "", "n/a"):
+        if oil and oil["diesel_b20"] not in (None, "", "n/a"):
             lines.append(
-                f"⛽ เบนซิน 95: {oil['gasoline_95']} | แก๊สโซฮอล์ 95: {oil['gasohol_95']} | "
-                f"แก๊สโซฮอล์ 91: {oil['gasohol_91']} บาท/ลิตร"
+                f"⛽ แก๊สโซฮอล์ 95: {oil['gasohol_95']} | แก๊สโซฮอล์ 91: {oil['gasohol_91']} บาท/ลิตร"
             )
-            lines.append(f"🚛 ดีเซล: {oil['diesel']} บาท/ลิตร  (ราคาสถานี ปตท. ณ {oil['date']})")
+            lines.append(
+                f"🚛 ดีเซล B20: {oil['diesel_b20']} | ไฮดีเซล S: {oil['hi_diesel']} บาท/ลิตร"
+                f"  (ราคาบางจาก ณ {oil['date']})"
+            )
             has_any_data = True
         else:
-            print("[WARN] แหล่งราคาน้ำมัน (api.chnwt.dev) ส่งค่าว่างมา (ต้นทางน่าจะมีปัญหาชั่วคราว) ข้ามส่วนนี้ไป")
+            print("[WARN] แหล่งราคาน้ำมัน (bangchak.co.th) ส่งค่าว่างมา ข้ามส่วนนี้ไป")
     except Exception as e:
         print(f"[WARN] ดึงราคาน้ำมันไม่สำเร็จ ({e})")
 
@@ -814,6 +982,18 @@ def build_message():
     lines = []
     lines.append(f"🌤️ สรุปสภาพอากาศ - {LOCATION_NAME}")
     lines.append(f"📅 {datetime.now().strftime('%d/%m/%Y %H:%M')}")
+
+    # หัวข้อพายุที่กำลังเข้าไทย (ผลกระทบภาคเหนือ) - ขึ้นก่อนหัวข้ออื่นทั้งหมด
+    if ENABLE_STORM:
+        try:
+            storm_block = build_storm_section()
+        except Exception as e:
+            print(f"[WARN] สร้างหัวข้อพายุไม่สำเร็จ ({e})")
+            storm_block = None
+        if storm_block:
+            lines.append("")
+            lines.append(storm_block)
+
     lines.append("")
     lines.append("── วันนี้ ──")
     lines.append(f"🌡️ อุณหภูมิปัจจุบัน: {current['temperature_2m']}°C")
@@ -844,8 +1024,8 @@ def build_message():
             lines.append(lottery_block)
 
     if ENABLE_LUCKY_NUMBER:
-        today = datetime.now().date()
-        days_left = (next_draw_date(today) - today).days
+        today_date = datetime.now().date()
+        days_left = (next_draw_date(today_date) - today_date).days
         if 1 <= days_left <= 7:
             lines.append(build_lucky_numbers_section())
 
@@ -884,7 +1064,9 @@ if __name__ == "__main__":
 
 # ========== การตั้งเวลารันอัตโนมัติ ==========
 # แนะนำ: ใช้ GitHub Actions (ไม่ต้องมีเซิร์ฟเวอร์ของตัวเอง)
-# ดูไฟล์ .github/workflows/weather.yml ที่มาคู่กัน
+# ดูไฟล์ .github/workflows/weather.yml ที่มาคู่กัน (อย่าลืมแก้บรรทัด pip install เป็น
+#     pip install requests beautifulsoup4
+# เพราะไฟล์นี้เพิ่ม BeautifulSoup เข้ามาใช้ scrape ราคาทอง/พายุ)
 #
 # หรือถ้ามีเครื่อง/เซิร์ฟเวอร์จริงๆ จะใช้ cron แบบเดิมก็ได้:
 # 0 6 * * * LINE_CHANNEL_ACCESS_TOKEN=xxx LINE_GROUP_ID=xxx /usr/bin/python3 /home/user/weather_notify.py >> /home/user/weather_notify.log 2>&1
