@@ -435,7 +435,7 @@ def get_gold_price():
     data = r.json()
     resp = data.get("response", {}) or {}
     price = resp.get("price", {}) or {}
-    return {
+    result = {
         "update_date": resp.get("update_date", "?"),
         "update_time": resp.get("update_time", "?"),
         "ornament_buy": (price.get("gold") or {}).get("buy", "n/a"),
@@ -443,6 +443,13 @@ def get_gold_price():
         "bar_buy": (price.get("gold_bar") or {}).get("buy", "n/a"),
         "bar_sell": (price.get("gold_bar") or {}).get("sell", "n/a"),
     }
+    # [DEBUG] ถ้า parse ออกมาแล้วว่างเปล่า ให้ dump raw JSON เต็มๆ ออกมาดู
+    # โครงสร้างจริงว่าต่างจากที่คาดไว้ตรงไหน
+    if not any([result["ornament_buy"] not in (None, "", "n/a"),
+                result["bar_buy"] not in (None, "", "n/a")]):
+        print("[DEBUG] ราคาทองคำ parse ได้ค่าว่าง raw JSON จาก api.chnwt.dev/thai-gold-api/latest:")
+        print(json.dumps(data, ensure_ascii=False))
+    return result
 
 
 def get_oil_price():
@@ -461,13 +468,18 @@ def get_oil_price():
     def _price(key):
         return (ptt.get(key) or {}).get("price", "n/a")
 
-    return {
+    result = {
         "date": resp.get("date", "?"),
         "gasoline_95": _price("gasoline_95"),
         "gasohol_95": _price("gasohol_95"),
         "gasohol_91": _price("gasohol_91"),
         "diesel": _price("diesel"),
     }
+    # [DEBUG] ถ้า parse ออกมาแล้วว่างเปล่า ให้ dump raw JSON เต็มๆ ออกมาดู
+    if result["diesel"] in (None, "", "n/a"):
+        print("[DEBUG] ราคาน้ำมัน parse ได้ค่าว่าง raw JSON จาก api.chnwt.dev/thai-oil-api/latest:")
+        print(json.dumps(data, ensure_ascii=False))
+    return result
 
 
 def get_usd_thb_rate():
